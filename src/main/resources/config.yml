@@ -1,0 +1,108 @@
+# ==========================================
+# KyochigoEconomy 核心配置
+# ==========================================
+
+# 货币符号 (用于聊天栏消息显示)
+currency: "<gold>$</gold>"
+
+# ==========================================
+# 类别定义 (Categories)
+# ==========================================
+# 这里的 key (如 ores, food) 仅用于 items 里的 category 字段进行逻辑归类。
+categories:
+  ores:
+    name: "<gradient:blue:cyan>稀有矿产</gradient>"
+  food:
+    name: "<gradient:green:yellow>农业与食物</gradient>"
+  weapons:
+    name: "<gradient:red:dark_red>神兵利器</gradient>"
+  misc:
+    name: "<gray>杂项</gray>"
+
+# ==========================================
+# 物品定义 (Items)
+# ==========================================
+# 修改后请使用 /plugman reload KyochigoEconomy 或重启服务器
+items:
+
+  # --- 示例 1: 原版物品 (标准配置) ---
+  diamond:
+    # 物品类型: MATERIAL (原版) 或 CRAFT_ENGINE (自定义)
+    type: MATERIAL
+    # 物品 ID: Minecraft 原版材质名 (必须大写)
+    id: DIAMOND
+    # (可选) 自定义列表显示的名称，不填则自动显示为 "Diamond"
+    # name: "&b稀有钻石"
+    # (可选) 自定义列表显示的图标，不填则默认使用 id 对应的材质
+    # icon: DIAMOND
+    category: ores
+    base_price: 100.0
+    lambda: 0.01
+    allow_buy: true
+    allow_sell: true
+
+  # --- 示例 2: 原版物品 (自定义名称) ---
+  golden_carrot:
+    type: MATERIAL
+    id: GOLDEN_CARROT
+    # 【新特性】自定义显示名称
+    name: "&6金胡萝卜"
+    category: food
+    base_price: 15.0
+    lambda: 0.005
+    allow_buy: true
+    allow_sell: true
+
+  # --- 示例 3: CraftEngine 自定义物品 (关键配置) ---
+  mythic_sword:
+    type: CRAFTENGINE
+    # 物品 ID: 对应 CraftEngine 里的 Item ID
+    id: "mythic:flame_sword"
+    # 【新特性】自定义名称
+    name: "&c[神话] 烈焰之剑"
+    # 【新特性】自定义图标 (重要！)
+    # 因为 "mythic:flame_sword" 不是有效的材质名，
+    # 必须指定一个原版材质(如 DIAMOND_SWORD)让菜单显示，否则会显示为箱子(CHEST)。
+    icon: DIAMOND_SWORD
+    category: weapons
+    base_price: 5000.0
+    lambda: 0.05
+    allow_buy: true
+    allow_sell: false
+
+  # --- 示例 4: 另一个原版物品 ---
+  iron_ingot:
+    type: MATERIAL
+    id: IRON_INGOT
+    category: ores
+    base_price: 10.0
+    lambda: 0.02
+    allow_buy: true
+    allow_sell: true
+
+    
+    
+# ==========================================
+# GUI 界面设置 (Market GUI Settings)
+# ==========================================
+gui:
+  market_list:
+    title: "&8今日市场行情"
+    external_title: "市场报价表"
+    
+    header:
+      decoration: "<yellow>============== 实时价格 =============="
+      # 这里的宽度不用太在意，代码里已经根据对齐算法处理了
+      width: 260
+
+    item:
+      # 当物品禁止交易时显示的文字
+      no_price_text: "$-"
+      
+      # 尺寸设置
+      width: 260
+      height: 24
+
+    close_button:
+      text: "&c[关闭]"
+      width: 100

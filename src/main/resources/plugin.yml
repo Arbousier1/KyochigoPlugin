@@ -1,0 +1,39 @@
+name: KyochigoEconomy
+version: 2.0-SNAPSHOT
+main: com.kyochigo.economy.KyochigoPlugin
+api-version: 1.21
+author: Kyochigo
+description: Rust backed economy system with zMenu integration
+
+# 【重要】列出你的依赖插件，即使找不到也不会报错
+softdepend: [Vault, zMenu, CraftEngine, PlaceholderAPI]
+
+commands:
+  market:
+    description: 打开市场列表
+    usage: /market [reload]
+    permission: kyochigo.market
+    
+  sellall:
+    description: 出售背包物品
+    usage: /sellall [物品ID]
+    permission: kyochigo.sellall
+
+  kyochigo:
+    description: 插件内部指令
+    usage: /kyochigo
+    permission: kyochigo.console
+
+permissions:
+  kyochigo.market:
+    description: 允许打开市场
+    default: true
+  kyochigo.sellall:
+    description: 允许使用出售指令
+    default: true
+  kyochigo.admin:
+    description: 管理员权限
+    default: op
+  kyochigo.console:
+    description: 内部执行权限
+    default: true
