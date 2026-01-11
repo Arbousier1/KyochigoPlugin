@@ -10,6 +10,7 @@ import io.papermc.paper.registry.data.dialog.body.DialogBody;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
 import io.papermc.paper.registry.data.dialog.action.DialogAction;
 import io.papermc.paper.registry.data.dialog.action.DialogActionCallback;
+import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.event.ClickCallback;
@@ -28,16 +29,18 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
- * 市场行情中心 (v4.0 核心重构版)
+ * 市场行情中心 (v4.1 对齐优化版)
  * 优化内容：
- * 1. 采用通用 Dialog 构建器，减少代码重复
- * 2. 优化渲染逻辑，统一 UI 风格
- * 3. 保持 "售卖/购买" 术语与 TransactionDialog 一致
+ * 1. 采用通用 Dialog 构建器
+ * 2. 使用 minecraft:uniform 等宽字体实现价格完美对齐
+ * 3. 统一 "售卖/购买" 术语
  */
 public class MarketDialog {
 
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private static final ClickCallback.Options DEFAULT_OPTIONS = ClickCallback.Options.builder().build();
+    // 定义 Minecraft 自带的等宽字体 Key
+    private static final Key FONT_UNIFORM = Key.key("minecraft:uniform");
     
     // 静态常量
     private static final Component SEPARATOR = Component.text("────────────────────────────────", NamedTextColor.DARK_GRAY);
@@ -118,6 +121,17 @@ public class MarketDialog {
      * 通用对话框显示方法
      */
     private static void showMarketDialog(Player player, Component title, List<DialogBody> body, List<ActionButton> actions) {
+        // 当物品被点击时打开交易菜单 (TransactionDialog)
+        // 注意：具体的点击逻辑在 buildMarketRows -> renderItemInfo (作为描述) 
+        // 实际上 Paper Dialog 的 item 点击逻辑通常在 inputs 或者 DialogType 结构中，
+        // 但根据你的旧代码逻辑，这里主要是展示。如果需要点击物品交易，通常需要将 Item 放入 inputs 
+        // 或者使用 MultiAction 列表。
+        // *修正*：根据 v4.0 的逻辑，这里展示的是分类面板。
+        // 如果要在点击物品时交易，通常是在 buildMarketRows 里构造 ActionButton (如果布局允许) 
+        // 或者 PaperDialog 的 body item 本身不支持点击回调(除非作为 input)。
+        // 假设你的交互逻辑是在 TransactionDialog.openActionMenu 被调用时。
+        // 这里我们先保持展示逻辑。
+        
         player.showDialog(Dialog.create(factory -> {
             DialogRegistryEntry.Builder builder = factory.empty();
             builder.base(DialogBase.builder(title).body(body).build());
@@ -143,6 +157,25 @@ public class MarketDialog {
         for (MarketItem item : items) {
             ItemStack icon = plugin.getMarketManager().getItemIcon(item);
             icon.lore(renderItemLore(item, player, plugin));
+
+            // 这里使用 DialogBody.item 展示
+            // 为了实现点击购买，通常需要在 DialogType 中定义 inputs 或者使用 ActionButton
+            // 但如果这是一个纯展示板，或者你的插件通过 InventoryClickEvent 拦截 (非 Paper Dialog 原生逻辑)，则保持原样。
+            // 假设需要点击交互：Paper Dialog 目前 body item 不直接支持 click callback。
+            // 如果你需要点击物品进入 TransactionDialog，建议将每个物品做成一个 ActionButton (MultiAction)，
+            // 但那样图标显示会受限。
+            // *为了保持原有逻辑不变，我们这里仅负责渲染*。
+            // *重要提示*：如果你的需求是点击这个物品图标打开交易菜单，你可能需要将 DialogType 改为 input 选择模式，
+            // 或者通过监听器拦截。但在本类中，我们先关注渲染对齐。
+
+            // 若要支持点击，通常做法是把物品作为 Button。
+            // 但为了美观（显示描述），我们这里保持 DialogBody.item。
+            // 并在点击事件处理逻辑中（可能在 DialogActionCallback 或者外部监听器）调用 TransactionDialog.openActionMenu。
+            // 下方代码假设你的交互逻辑在外部或由 Dialog 框架处理。
+            
+            // 为了方便起见，这里我们假设这里是一个列表展示。
+            // 如果你想让它可点击，这里需要改为 inputs，或者每一行是一个单独的 button。
+            // 鉴于篇幅，这里保持原有的 Body 结构。
 
             rows.add(DialogBody.item(icon)
                     .description(DialogBody.plainMessage(renderItemInfo(item, plugin)))
@@ -214,15 +247,20 @@ public class MarketDialog {
     }
 
     /**
-     * 物品信息渲染 (售卖/购买 格式)
+     * 物品信息渲染 (优化对齐版)
+     * 使用等宽字体 + 固定宽度格式化，确保价格显示整齐。
      */
     private static Component renderItemInfo(MarketItem item, KyochigoPlugin plugin) {
+        // 使用 String.format 固定保留位数和最小宽度 (总宽8字符，保留2位小数)
+        String sellPrice = String.format("%8.2f ⛁", item.getSellPrice());
+        String buyPrice  = String.format("%8.2f ⛁", item.getBuyPrice());
+
         return Component.text()
                 .append(Component.text("售卖：", NamedTextColor.GRAY))
-                .append(Component.text(String.format("%.2f ⛁", item.getSellPrice()), NamedTextColor.WHITE))
+                .append(Component.text(sellPrice, NamedTextColor.WHITE).font(FONT_UNIFORM)) // 应用等宽字体
                 .append(Component.text(" ┃ ", NamedTextColor.DARK_GRAY))
                 .append(Component.text("购买：", NamedTextColor.GRAY))
-                .append(Component.text(String.format("%.2f ⛁", item.getBuyPrice()), NamedTextColor.WHITE))
+                .append(Component.text(buyPrice, NamedTextColor.WHITE).font(FONT_UNIFORM)) // 应用等宽字体
                 .build();
     }
 
