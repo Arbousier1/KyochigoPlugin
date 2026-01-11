@@ -28,15 +28,18 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
- * 市场行情中心 (v3.2 极致性能版)
- * 修正内容：使用 Placeholder 替代失效的 asString() 方法，解决颜色解析报错。
+ * 市场行情中心 (v4.0 核心重构版)
+ * 优化内容：
+ * 1. 采用通用 Dialog 构建器，减少代码重复
+ * 2. 优化渲染逻辑，统一 UI 风格
+ * 3. 保持 "售卖/购买" 术语与 TransactionDialog 一致
  */
 public class MarketDialog {
 
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private static final ClickCallback.Options DEFAULT_OPTIONS = ClickCallback.Options.builder().build();
     
-    // 静态 UI 组件常量
+    // 静态常量
     private static final Component SEPARATOR = Component.text("────────────────────────────────", NamedTextColor.DARK_GRAY);
     private static final Component BTN_BACK = MM.deserialize("<gray>[ 返回 ]</gray>");
     private static final Component BTN_LEAVE = MM.deserialize("<red>[ 离开 ]</red>");
@@ -56,26 +59,20 @@ public class MarketDialog {
             return;
         }
 
+        // 构建分类按钮
         List<ActionButton> buttons = categories.getKeys(false).stream()
-                .map(key -> createCategoryButton(plugin, key, viewOnly))
+                .map(key -> createBtn(
+                    getCategoryName(plugin, key), 
+                    (v, a) -> { if (a instanceof Player p) fetchPricesAndOpenSubMenu(p, key, viewOnly); }
+                ))
                 .collect(Collectors.toList());
 
-        player.showDialog(Dialog.create(factory -> {
-            DialogRegistryEntry.Builder builder = factory.empty();
-            builder.base(DialogBase.builder(MM.deserialize("<gold><b>实时市场行情</b></gold>")).build());
-            builder.type(DialogType.multiAction(buttons).build());
-        }));
+        showMarketDialog(player, MM.deserialize("<gold><b>实时市场行情</b></gold>"), List.of(), buttons);
     }
 
-    private static ActionButton createCategoryButton(KyochigoPlugin plugin, String key, boolean viewOnly) {
-        DialogActionCallback callback = (view, audience) -> {
-            if (audience instanceof Player p) fetchPricesAndOpenSubMenu(p, key, viewOnly);
-        };
-        return ActionButton.builder(getCategoryName(plugin, key))
-                .action(DialogAction.customClick(callback, DEFAULT_OPTIONS))
-                .build();
-    }
-
+    /**
+     * 数据预加载逻辑
+     */
     private static void fetchPricesAndOpenSubMenu(Player player, String categoryId, boolean viewOnly) {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
         List<String> itemIds = plugin.getMarketManager().getAllItems().stream()
@@ -90,34 +87,59 @@ public class MarketDialog {
         });
     }
 
+    /**
+     * 显示具体分类面板 (Sub-Menu)
+     */
     private static void showCategoryBoard(Player player, String category, boolean viewOnly) {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
+        
+        // 1. 筛选物品
         List<MarketItem> items = plugin.getMarketManager().getAllItems().stream()
                 .filter(i -> i.getCategory().equalsIgnoreCase(category))
                 .collect(Collectors.toList());
 
-        List<DialogBody> rows = buildItemRows(plugin, items, player);
+        // 2. 构建列表内容
+        List<DialogBody> rows = buildMarketRows(plugin, items, player);
 
+        // 3. 构建底部导航 (返回/离开)
+        List<ActionButton> navButtons = List.of(
+            createBtn(BTN_BACK, (v, a) -> { if (a instanceof Player p) open(p, viewOnly); }),
+            ActionButton.builder(BTN_LEAVE).build()
+        );
+
+        showMarketDialog(player, getCategoryName(plugin, category), rows, navButtons);
+    }
+
+    // =========================================================================
+    // 核心构建器 (Core Builders)
+    // =========================================================================
+
+    /**
+     * 通用对话框显示方法
+     */
+    private static void showMarketDialog(Player player, Component title, List<DialogBody> body, List<ActionButton> actions) {
         player.showDialog(Dialog.create(factory -> {
             DialogRegistryEntry.Builder builder = factory.empty();
-            builder.base(DialogBase.builder(getCategoryName(plugin, category)).body(rows).build());
+            builder.base(DialogBase.builder(title).body(body).build());
 
-            DialogActionCallback backAction = (v, a) -> { if (a instanceof Player p) open(p, viewOnly); };
-            
-            builder.type(DialogType.confirmation(
-                    ActionButton.builder(BTN_BACK).action(DialogAction.customClick(backAction, DEFAULT_OPTIONS)).build(),
-                    ActionButton.builder(BTN_LEAVE).build()
-            ));
+            // 智能判断类型：如果是2个按钮则为 Confirmation (用于子菜单)，否则为 MultiAction (用于主菜单)
+            if (actions.size() == 2) {
+                builder.type(DialogType.confirmation(actions.get(0), actions.get(1)));
+            } else {
+                builder.type(DialogType.multiAction(actions).build());
+            }
         }));
     }
 
-    private static List<DialogBody> buildItemRows(KyochigoPlugin plugin, List<MarketItem> items, Player player) {
+    private static List<DialogBody> buildMarketRows(KyochigoPlugin plugin, List<MarketItem> items, Player player) {
         List<DialogBody> rows = new ArrayList<>();
         double envIndex = plugin.getMarketManager().getLastEnvIndex();
 
+        // 添加头部信息
         rows.add(DialogBody.plainMessage(renderMarketHeader(envIndex)));
         rows.add(DialogBody.plainMessage(SEPARATOR));
 
+        // 添加物品列表
         for (MarketItem item : items) {
             ItemStack icon = plugin.getMarketManager().getItemIcon(item);
             icon.lore(renderItemLore(item, player, plugin));
@@ -127,6 +149,17 @@ public class MarketDialog {
                     .build());
         }
         return rows;
+    }
+
+    private static ActionButton createBtn(Component label, DialogActionCallback callback) {
+        return ActionButton.builder(label)
+                .action(DialogAction.customClick(callback, DEFAULT_OPTIONS))
+                .build();
+    }
+    
+    // 重载方法支持 String
+    private static ActionButton createBtn(String label, DialogActionCallback callback) {
+        return createBtn(MM.deserialize(label), callback);
     }
 
     // =========================================================================
@@ -162,9 +195,6 @@ public class MarketDialog {
         return line.build();
     }
 
-    /**
-     * 核心修正：使用 Placeholder 占位符解析动态颜色与数值
-     */
     private static Optional<Component> renderQuotaLore(MarketItem item, Player player, KyochigoPlugin plugin) {
         int limit = plugin.getConfiguration().getItemDailyLimit(item.getConfigKey());
         if (limit <= 0) return Optional.empty();
@@ -172,10 +202,8 @@ public class MarketDialog {
         int traded = plugin.getHistoryManager().getDailyTradeCount(player.getUniqueId().toString(), item.getConfigKey());
         int remain = Math.max(0, limit - traded);
         
-        // 判定颜色对象
         NamedTextColor color = (remain > limit * 0.2) ? NamedTextColor.WHITE : NamedTextColor.RED;
 
-        // 使用 Placeholder 链式调用
         return Optional.of(MM.deserialize(
             "<gray>今日配额：</gray><color><traded> / <limit></color> <gray>(余 <remain>)</gray>",
             Placeholder.styling("color", color),
@@ -185,14 +213,15 @@ public class MarketDialog {
         ));
     }
 
+    /**
+     * 物品信息渲染 (售卖/购买 格式)
+     */
     private static Component renderItemInfo(MarketItem item, KyochigoPlugin plugin) {
         return Component.text()
-                .append(item.getDisplayNameComponent(plugin.getMarketManager().getCraftEngineHook()).decorate(TextDecoration.BOLD))
-                .append(Component.newline())
-                .append(Component.text("商会回收：", NamedTextColor.GRAY))
+                .append(Component.text("售卖：", NamedTextColor.GRAY))
                 .append(Component.text(String.format("%.2f ⛁", item.getSellPrice()), NamedTextColor.WHITE))
                 .append(Component.text(" ┃ ", NamedTextColor.DARK_GRAY))
-                .append(Component.text("物资申购：", NamedTextColor.GRAY))
+                .append(Component.text("购买：", NamedTextColor.GRAY))
                 .append(Component.text(String.format("%.2f ⛁", item.getBuyPrice()), NamedTextColor.WHITE))
                 .build();
     }
