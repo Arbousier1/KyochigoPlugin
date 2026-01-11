@@ -18,10 +18,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
 
 /**
- * KyochigoEconomy PAPI 扩展 (v3.1 最终版)
- * 优化：
- * 1. 增加了 env_index 数值占位符。
- * 2. 优化了价格格式化逻辑。
+ * KyochigoEconomy PAPI 扩展 (v3.2 最终修正版)
+ * 修正点：
+ * 1. 价格计算逻辑增加 envIndex 乘数，与 GUI 保持绝对对齐。
+ * 2. 汉化了 env_note 的输出。
+ * 3. 修正了趋势判断的基准值。
  */
 public class KyochigoExpansion extends PlaceholderExpansion {
     
@@ -57,7 +58,7 @@ public class KyochigoExpansion extends PlaceholderExpansion {
     @Override
     public @NotNull String getAuthor() { return "Kyochigo"; }
     @Override
-    public @NotNull String getVersion() { return "3.1.0"; } 
+    public @NotNull String getVersion() { return "3.2.0"; } 
     @Override
     public boolean persist() { return true; }
 
@@ -65,8 +66,18 @@ public class KyochigoExpansion extends PlaceholderExpansion {
     public @Nullable String onPlaceholderRequest(Player player, @NotNull String params) {
         if (player == null) return "";
 
-        // 1. 环境因子 (数值与文案)
-        if (params.equalsIgnoreCase("env_note")) return marketManager.getLastEnvNote();
+        // 1. 环境因子 (增加汉化映射，与 GUI 状态对齐)
+        if (params.equalsIgnoreCase("env_note")) {
+            String rawNote = marketManager.getLastEnvNote();
+            return switch (rawNote.toLowerCase()) {
+                case "normal" -> "行情平稳";
+                case "weekend" -> "周末特惠";
+                case "prosperous" -> "贸易繁荣";
+                case "depressed" -> "行情低迷";
+                default -> rawNote;
+            };
+        }
+        
         if (params.equalsIgnoreCase("env_index")) return String.format("%.2f", marketManager.getLastEnvIndex());
 
         // 2. 交易会话数据
@@ -95,25 +106,41 @@ public class KyochigoExpansion extends PlaceholderExpansion {
 
     private String handleItemName(Player player, String itemKey) {
         MarketItem item = getCachedItem(itemKey);
+        // 使用 getPlainDisplayName 以确保获取的是经过汉化处理的名称
         return item != null ? item.getPlainDisplayName() : "未知物品";
     }
 
+    /**
+     * 核心修正：价格获取逻辑增加环境指数加成
+     */
     private String handlePrice(String itemKey, boolean isBuy) {
         MarketItem item = getCachedItem(itemKey);
         if (item == null) return "0.00";
-        // 这里的 getBuyPrice() 已经包含了 Rust 后端传回的实时价格计算逻辑
-        double price = isBuy ? item.getBuyPrice() : item.getSellPrice();
-        return String.format("%.2f", price);
+        
+        // 获取实时环境指数
+        double envIndex = marketManager.getLastEnvIndex();
+        // 获取基础实时价格 (来自后端推送)
+        double basePrice = isBuy ? item.getBuyPrice() : item.getSellPrice();
+        
+        // 返回 最终单价 = 基础实时价 * 环境指数
+        return String.format("%.2f", basePrice * envIndex);
     }
 
+    /**
+     * 核心修正：趋势判断逻辑同步应用环境指数
+     */
     private String handleTrend(Player player, String itemKey) {
         MarketItem item = getCachedItem(itemKey);
         if (item == null) return "";
-        double current = item.getSellPrice();
+        
+        double envIndex = marketManager.getLastEnvIndex();
+        // 当前最终售价
+        double current = item.getSellPrice() * envIndex;
+        // 配置的基础参考价
         double base = item.getBasePrice();
         
-        if (current > base * 1.01) return "§a↑"; // 1% 波动才显示箭头
-        if (current < base * 0.99) return "§c↓";
+        if (current > base * 1.01) return "§a↑"; // 涨幅超过 1%
+        if (current < base * 0.99) return "§c↓"; // 跌幅超过 1%
         return "§7-";
     }
 

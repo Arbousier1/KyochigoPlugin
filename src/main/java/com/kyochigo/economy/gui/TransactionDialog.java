@@ -15,7 +15,6 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.event.ClickCallback;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.entity.Player;
@@ -26,8 +25,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 交易确认对话框 (v8.0 最终适配版)
- * 职责：作为 TradeSelectorMenu 的延续，负责处理具体商品数量的确认与结算。
+ * 交易确认对话框 (严格对齐 MarketDialog 版)
+ * 1. 逻辑标准：显示基准价格，不计算环境加权
+ * 2. 术语标准：统一使用 "购买：" 与 "售卖："
+ * 3. 视觉标准：等宽字体 + 白色数值 + 金色符号
  */
 public class TransactionDialog {
 
@@ -35,100 +36,93 @@ public class TransactionDialog {
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private static final Key FONT_UNIFORM = Key.key("minecraft:uniform");
 
-    // UI 文案
+    // UI 文案统一
     private static final String ACTION_TITLE = "<gradient:#40E0D0:#008080><b>商业交易中心</b></gradient>";
     private static final String ENTRY_TITLE = "<gradient:#FFD700:#FFA500><b>Kyochigo 交易所</b></gradient>";
-    private static final String BUY_TITLE = "<gradient:#55FF55:#00AA00><b>确认采购申请</b></gradient>";
-    private static final String SELL_TITLE = "<gradient:#FFCC33:#E67E22><b>确认资产出售</b></gradient>";
-    private static final String DIVIDER = "<dark_gray>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</dark_gray>";
+    private static final String BUY_TITLE = "<gradient:#55FF55:#00AA00><b>确认购买</b></gradient>";
+    private static final String SELL_TITLE = "<gradient:#FFCC33:#E67E22><b>确认售卖</b></gradient>";
+    private static final String DIVIDER = "<dark_gray>──────────────────────────────</dark_gray>";
     private static final String CURRENCY = " <gold>⛁</gold>";
 
-    // 静态按钮
-    private static final Component CONFIRM_SELL = MM.deserialize("<bold><gradient:#FFCC33:#E67E22> [ 签署出售协议 ] </gradient></bold>");
-    private static final Component CONFIRM_BUY = MM.deserialize("<bold><gradient:#55FF55:#00AA00> [ 支付并完成采购 ] </gradient></bold>");
+    // 静态按钮对齐
+    private static final Component CONFIRM_SELL = MM.deserialize("<bold><gradient:#FFCC33:#E67E22> [ 确认售卖 ] </gradient></bold>");
+    private static final Component CONFIRM_BUY = MM.deserialize("<bold><gradient:#55FF55:#00AA00> [ 确认购买 ] </gradient></bold>");
     private static final Component CANCEL = MM.deserialize("<gray> [ 放弃本次交易 ] </gray>");
-    private static final Component INSUFFICIENT_FUNDS = MM.deserialize("<gray>账户资金余额不足</gray>");
-    private static final Component INSUFFICIENT_WARNING = MM.deserialize("<red><b>余额不足，请调整采购方案！</b></red>");
+    private static final Component INSUFFICIENT_FUNDS = MM.deserialize("<red> [ 账户余额不足 ] </red>");
 
     // ========================================================================
-    // 1. 入口逻辑 (NPC 交互第一层)
+    // 1. 入口逻辑
     // ========================================================================
 
     public static void openEntryMenu(Player player, String targetCategory) {
-        // 修改点：不再在第一层区分买卖，而是引导进入统一的箱子菜单
-        ActionButton btnEnter = createBtn("<gradient:#00F260:#0575E6><b>   进入柜台选货   </b></gradient>", (v, a) -> {
+        ActionButton btnEnter = createBtn("<gradient:#00F260:#0575E6><b> 进入柜台选货 </b></gradient>", (v, a) -> {
             if (a instanceof Player p) {
-                if (targetCategory != null) {
-                    TradeSelectorMenu.openItemSelect(p, targetCategory);
-                } else {
-                    // 若无分类则打开全分类选择 (建议也将此改为箱子菜单)
-                    TradeSelectorMenu.openItemSelect(p, "misc"); 
-                }
+                TradeSelectorMenu.openItemSelect(p, targetCategory != null ? targetCategory : "ores", 0);
             }
         });
 
-        Component desc;
-        if (targetCategory != null) {
-            String friendlyName = getCategoryFriendlyName(targetCategory);
-            desc = MM.deserialize("<newline><gray>当前服务柜台：<white>" + friendlyName + "</white><newline><gray>操作指引：<white>左键购买 / 右键出售</white></gray>");
-        } else {
-            desc = MM.deserialize("<newline><gray>欢迎光临，请点击下方按钮开始贸易业务：</gray>");
-        }
+        Component desc = targetCategory != null 
+            ? MM.deserialize("<newline><gray>当前柜台：<white>" + getCategoryFriendlyName(targetCategory) + "</white><newline><gray>操作：<white>左键购买 / 右键售卖</white></gray>")
+            : MM.deserialize("<newline><gray>欢迎光临，请点击下方按钮开始贸易：</gray>");
 
         createAndShowDialog(player, MM.deserialize(ENTRY_TITLE), desc, List.of(btnEnter, ActionButton.builder(CANCEL).build()));
     }
 
     // ========================================================================
-    // 2. 数量选择逻辑 (箱子菜单点击后进入)
+    // 2. 数量选择逻辑 (已对齐基准价显示)
     // ========================================================================
 
-    public static void openActionMenu(Player player, MarketItem item, Boolean isBuyMode) {
+    public static void openActionMenu(Player player, MarketItem item, boolean isBuyMode) {
+        KyochigoPlugin plugin = KyochigoPlugin.getInstance();
+        
         List<ActionButton> actions = new ArrayList<>();
-
         if (isBuyMode) addBuyActions(actions, item);
         else addSellActions(actions, item);
-        
         actions.add(ActionButton.builder(CANCEL).build());
 
-        TextComponent.Builder desc = Component.text();
-        desc.append(MM.deserialize("<newline>"));
+        TextComponent.Builder desc = Component.text().append(Component.newline());
+        
+        // 【核心对齐】显示基准价格，不乘以 envIndex
         if (isBuyMode) {
-            desc.append(formatRichPrice(item.getBuyPrice(), "采购基准单价", "#00FF7F"));
+            desc.append(formatStandardPrice(item.getBuyPrice(), "购买："));
         } else {
-            desc.append(formatRichPrice(item.getSellPrice(), "市场回收单价", "#FFD700"));
+            desc.append(formatStandardPrice(item.getSellPrice(), "售卖："));
         }
+        
+        // 环境行情仅作为参考信息展示
+        double envIndex = plugin.getMarketManager().getLastEnvIndex();
+        String envNote = plugin.getMarketManager().getLastEnvNote();
+        desc.append(MM.deserialize("<newline><dark_gray>市场行情参考: <white>" + envNote + "</white> (x" + String.format("%.2f", envIndex) + ")</dark_gray>"));
 
         showTransactionDialog(player, item, ACTION_TITLE, desc.build(), actions);
     }
 
     private static void addBuyActions(List<ActionButton> actions, MarketItem item) {
-        double price = item.getBuyPrice();
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
-        actions.add(createBtn("<green>▸ 采购少量 (1个)        </green>", (v, a) -> plugin.getTransactionManager().openBuyConfirmDialog((Player)a, item, 1)));
-        actions.add(createBtn("<green>▸ 采购成组 (64个)       </green>", (v, a) -> plugin.getTransactionManager().openBuyConfirmDialog((Player)a, item, 64)));
-        actions.add(createBtn("<green>▸ 补齐库存 (背包装满)   </green>", (v, a) -> {
+        actions.add(createBtn("<green>▸ 购买少量 (1个) </green>", (v, a) -> plugin.getTransactionManager().openBuyConfirmDialog((Player)a, item, 1)));
+        actions.add(createBtn("<green>▸ 购买整组 (64个) </green>", (v, a) -> plugin.getTransactionManager().openBuyConfirmDialog((Player)a, item, 64)));
+        actions.add(createBtn("<green>▸ 购买全部 (补齐库存) </green>", (v, a) -> {
             Player p = (Player) a;
             int maxSpace = getInventoryFreeSpace(p, plugin.getMarketManager().getItemIcon(item));
             if (maxSpace > 0) plugin.getTransactionManager().openBuyConfirmDialog(p, item, maxSpace);
-            else p.sendMessage(MM.deserialize("<red>仓库已满，无法容纳更多物资。</red>"));
+            else p.sendMessage(MM.deserialize("<red>行囊已满。</red>"));
         }));
     }
 
     private static void addSellActions(List<ActionButton> actions, MarketItem item) {
-        double price = item.getSellPrice();
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
-        actions.add(createBtn("<gold>▸ 出售少量 (1个)        </gold>", (v, a) -> plugin.getTransactionManager().openSellConfirmDialog((Player)a, item, 1)));
-        actions.add(createBtn("<gold>▸ 出售整组 (64个)       </gold>", (v, a) -> plugin.getTransactionManager().openSellConfirmDialog((Player)a, item, 64)));
-        actions.add(createBtn("<gold>▸ 出售全部 (清空背包)   </gold>", (v, a) -> {
+        actions.add(createBtn("<gold>▸ 售卖少量 (1个) </gold>", (v, a) -> plugin.getTransactionManager().openSellConfirmDialog((Player)a, item, 1)));
+        actions.add(createBtn("<gold>▸ 售卖整组 (64个) </gold>", (v, a) -> plugin.getTransactionManager().openSellConfirmDialog((Player)a, item, 64)));
+        actions.add(createBtn("<gold>▸ 售卖全部 (清空背包) </gold>", (v, a) -> {
             Player p = (Player) a;
             int count = countPlayerItems(p, item, plugin);
             if (count > 0) plugin.getTransactionManager().openSellConfirmDialog(p, item, count);
-            else p.sendMessage(MM.deserialize("<red>您的行囊中没有该物资。</red>"));
+            else p.sendMessage(MM.deserialize("<red>行囊中没有该物资。</red>"));
         }));
     }
 
     // ========================================================================
-    // 3. 最终确认阶段 (由 TransactionManager 预计算后调回)
+    // 3. 最终确认阶段
     // ========================================================================
 
     public static void openBuyConfirm(Player player, MarketItem item, int amount, double unitPrice) {
@@ -142,6 +136,7 @@ public class TransactionDialog {
     private static void openTransactionConfirm(Player player, MarketItem item, int amount, double price, boolean isBuy) {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
         double balance = plugin.getEconomy().getBalance(player);
+        
         Component content = buildTransactionContent(item, amount, price, balance, isBuy);
         
         boolean canProceed = !isBuy || (balance >= amount * price);
@@ -150,7 +145,6 @@ public class TransactionDialog {
 
         DialogActionCallback callback = (view, audience) -> {
             if (audience instanceof Player p) {
-                // 提交执行
                 plugin.getTransactionManager().executeTransaction(p, item, amount);
             }
         };
@@ -165,14 +159,14 @@ public class TransactionDialog {
     }
 
     // ========================================================================
-    // 4. 视觉与工具函数
+    // 4. 视觉对齐工具
     // ========================================================================
 
-    private static Component formatRichPrice(double price, String label, String colorCode) {
+    private static Component formatStandardPrice(double price, String label) {
+        String priceStr = String.format("%8.2f", price);
         return Component.text()
-                .append(Component.text(label + " ", NamedTextColor.GRAY))
-                .append(Component.text(" » ", NamedTextColor.DARK_GRAY))
-                .append(Component.text(String.format("%8.2f", price), TextColor.fromHexString(colorCode)).font(FONT_UNIFORM))
+                .append(Component.text(label, NamedTextColor.GRAY))
+                .append(Component.text(priceStr, NamedTextColor.WHITE).font(FONT_UNIFORM))
                 .append(MM.deserialize(CURRENCY))
                 .build();
     }
@@ -182,21 +176,26 @@ public class TransactionDialog {
         double total = amount * price;
 
         TextComponent.Builder builder = Component.text()
-                .append(MM.deserialize("<newline><gray>正在准备 <white>" + (isBuy ? "购入" : "售出") + "</white> 业务：</gray><newline>"))
+                .append(MM.deserialize("<newline><gray>正在准备 <white>" + (isBuy ? "购买" : "售卖") + "</white> 业务：</gray><newline>"))
                 .append(item.getDisplayNameComponent(plugin.getMarketManager().getCraftEngineHook()).color(NamedTextColor.WHITE).decorate(TextDecoration.BOLD))
                 .append(Component.text(" x" + amount, NamedTextColor.AQUA)).append(Component.newline())
                 .append(MM.deserialize(DIVIDER)).append(Component.newline());
 
+        // 统一单价对齐
+        builder.append(formatStandardPrice(price, (isBuy ? "购买" : "售卖") + "单价：")).append(Component.newline());
+
         if (isBuy) {
-            builder.append(MM.deserialize("<gray>预计总额：</gray><red>-" + String.format("%.2f", total) + "</red>")).append(MM.deserialize(CURRENCY)).append(Component.newline())
-                   .append(MM.deserialize("<gray>当前余额：</gray><white>" + String.format("%.2f", balance) + "</white>")).append(MM.deserialize(CURRENCY));
-            if (balance < total) builder.append(MM.deserialize("<newline><red><b>余额不足，请调整采购方案！</b></red>"));
+            builder.append(MM.deserialize("<gray>预计支付总额：</gray><red>-" + String.format("%.2f", total) + "</red>")).append(MM.deserialize(CURRENCY)).append(Component.newline())
+                   .append(MM.deserialize("<gray>当前账户余额：</gray><white>" + String.format("%.2f", balance) + "</white>")).append(MM.deserialize(CURRENCY));
         } else {
-            builder.append(MM.deserialize("<gray>成交单价：</gray><white>" + String.format("%.2f", price) + "</white>")).append(MM.deserialize(CURRENCY)).append(Component.newline())
-                   .append(MM.deserialize("<gray>预计收益：</gray><green>+" + String.format("%.2f", total) + "</green>")).append(MM.deserialize(CURRENCY));
+            builder.append(MM.deserialize("<gray>预计成交收益：</gray><green>+" + String.format("%.2f", total) + "</green>")).append(MM.deserialize(CURRENCY));
         }
         return builder.build();
     }
+
+    // ========================================================================
+    // 辅助逻辑
+    // ========================================================================
 
     private static void createAndShowDialog(Player player, Component title, Component body, List<ActionButton> actions) {
         player.showDialog(Dialog.create(factory -> {
@@ -222,11 +221,9 @@ public class TransactionDialog {
 
     private static String getCategoryFriendlyName(String categoryId) {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
-        String path = "categories." + categoryId + ".name";
-        String fromConfig = plugin.getConfiguration().getRaw().getString(path);
-        return fromConfig != null ? fromConfig.replaceAll("<[^>]*>", "") : 
-               Map.of("ores", "矿产资源", "food", "烹饪物资", "crops", "农耕作物", "weapons", "神兵利器")
-               .getOrDefault(categoryId.toLowerCase(), categoryId);
+        String fromConfig = plugin.getConfiguration().getRaw().getString("categories." + categoryId + ".name");
+        if (fromConfig != null) return fromConfig.replaceAll("<[^>]*>", "");
+        return categoryId;
     }
 
     private static ActionButton createBtn(String label, DialogActionCallback callback) {
