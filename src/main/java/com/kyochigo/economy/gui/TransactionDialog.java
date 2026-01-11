@@ -23,18 +23,17 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 交易确认对话框 (v5.1 NPC分类适配版)
- * 更新：openEntryMenu 支持接收 targetCategory，实现点击特定NPC直接进入该分类的买卖选择。
+ * 交易确认对话框 (v5.2 修复编译版)
+ * 修复：body() 方法必须接收 List 类型参数
  */
 public class TransactionDialog {
 
     private static final ClickCallback.Options DEFAULT_OPTIONS = ClickCallback.Options.builder().build();
     private static final MiniMessage MM = MiniMessage.miniMessage();
 
-    // 标题与常量
     private static final String SELL_TITLE = "<gold><b>售卖确认</b></gold>";
     private static final String BUY_TITLE = "<aqua><b>购买确认</b></aqua>";
-    private static final String ACTION_TITLE = "<dark_aqua><b>选择交易操作</b></dark_aqua>";
+    private static final String ACTION_TITLE = "<dark_aqua><b>选择交易数量</b></dark_aqua>";
     private static final String ENTRY_TITLE = "<gold><b>Kyochigo 交易所</b></gold>";
     private static final String DIVIDER = "<dark_gray>────────────────────────────────</dark_gray>";
     private static final String CURRENCY = " ⛁";
@@ -62,10 +61,8 @@ public class TransactionDialog {
             .action(DialogAction.customClick((view, audience) -> {
                 if (audience instanceof Player p) {
                     if (targetCategory != null) {
-                        // NPC 模式：直接进入该分类的物品列表
                         TradeSelectorDialog.openItemSelect(p, targetCategory, true);
                     } else {
-                        // 指令模式：进入分类选择列表
                         TradeSelectorDialog.openCategorySelect(p, true);
                     }
                 }
@@ -77,10 +74,8 @@ public class TransactionDialog {
             .action(DialogAction.customClick((view, audience) -> {
                 if (audience instanceof Player p) {
                     if (targetCategory != null) {
-                        // NPC 模式：直接进入该分类的物品列表
                         TradeSelectorDialog.openItemSelect(p, targetCategory, false);
                     } else {
-                        // 指令模式：进入分类选择列表
                         TradeSelectorDialog.openCategorySelect(p, false);
                     }
                 }
@@ -92,15 +87,15 @@ public class TransactionDialog {
             Component desc;
             
             if (targetCategory != null) {
-                // 显示当前柜台名称
                 String categoryName = getCategoryName(targetCategory);
                 desc = MM.deserialize("<gray>当前柜台：<white>" + categoryName + "</white><newline>请选择您的交易意向：</gray>");
             } else {
                 desc = MM.deserialize("<gray>请选择您的交易意向：</gray>");
             }
 
+            // ★★★ 修复点：将 DialogBody.plainMessage 包裹在 List.of() 中 ★★★
             builder.base(DialogBase.builder(MM.deserialize(ENTRY_TITLE))
-                .body(DialogBody.plainMessage(desc))
+                .body(List.of(DialogBody.plainMessage(desc))) 
                 .build());
 
             builder.type(DialogType.confirmation(btnBuy, btnSell));
@@ -109,7 +104,6 @@ public class TransactionDialog {
 
     /**
      * [操作菜单] 手持物品直接打开 / 物品列表点击打开
-     * @param isBuyMode true=只买, false=只卖, null=显示全部
      */
     public static void openActionMenu(Player player, MarketItem item, Boolean isBuyMode) {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
@@ -118,7 +112,7 @@ public class TransactionDialog {
 
         List<ActionButton> actions = new ArrayList<>();
 
-        // 1. 购买组 (意图为 Null 或 True 时显示)
+        // 1. 购买组
         if (isBuyMode == null || isBuyMode) {
             actions.add(createBtn("<green>购买 x1</green>", 
                 (v, a) -> openTransactionConfirm((Player)a, item, 1, buyPrice, true)));
@@ -134,7 +128,7 @@ public class TransactionDialog {
             }));
         }
 
-        // 2. 售卖组 (意图为 Null 或 False 时显示)
+        // 2. 售卖组
         if (isBuyMode == null || !isBuyMode) {
             actions.add(createBtn("<gold>售卖 x1</gold>", 
                 (v, a) -> openTransactionConfirm((Player)a, item, 1, sellPrice, false)));
@@ -272,7 +266,6 @@ public class TransactionDialog {
         return freeSpace;
     }
 
-    // 简单获取中文名，用于显示当前柜台
     private static String getCategoryName(String id) {
         return java.util.Map.of(
             "ores", "矿产资源", "food", "烹饪美食", "crops", "农耕作物",
