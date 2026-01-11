@@ -57,14 +57,14 @@ repositories {
 
 dependencies {
     // 核心依赖
-    compileOnly 'io.papermc.paper:paper-api:1.21.1-R0.1-SNAPSHOT'
+    compileOnly 'io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT'
 
     // Vault (排除冲突的 Bukkit)
     compileOnly ('com.github.MilkBowl:VaultAPI:1.7') {
         exclude group: 'org.bukkit', module: 'bukkit'
     }
 
-    compileOnly 'me.clip:placeholderapi:2.11.5'
+    compileOnly 'me.clip:placeholderapi:2.11.6'
     compileOnly 'net.momirealms:craft-engine-bukkit:0.0.66'
     compileOnly 'net.momirealms:craft-engine-core:0.0.66'
 
