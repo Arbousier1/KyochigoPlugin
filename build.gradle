@@ -1,0 +1,104 @@
+plugins {
+    id 'java'
+    // Shadow 插件：用于打包 uber-jar
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+group = 'com.kyochigo'
+version = '2.0-SNAPSHOT'
+// [更新] 移除了 zMenu 的描述
+description = 'Minecraft 动态经济系统 (Java + Rust + CraftEngine + PAPI + FancyNpcs)'
+
+// 设置 Java 版本为 21
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+ext {
+    javaVersion = 21
+    encoding = 'UTF-8'
+}
+
+repositories {
+    mavenCentral()
+    
+    maven {
+        name = 'papermc'
+        url = 'https://repo.papermc.io/repository/maven-public/'
+    }
+    
+    maven {
+        name = 'spigot-repo'
+        url = 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/'
+    }
+    
+    maven {
+        name = 'momirealms-repo'
+        url = 'https://repo.momirealms.net/releases/'
+    }
+    
+    maven {
+        name = 'placeholderapi'
+        url = 'https://repo.extendedclip.com/content/repositories/placeholderapi/'
+    }
+    
+    maven {
+        name = 'jitpack'
+        url = 'https://jitpack.io'
+    }
+
+    // FancyNpcs 官方仓库
+    maven {
+        name = 'fancyinnovations'
+        url = 'https://repo.fancyinnovations.com/releases'
+    }
+}
+
+dependencies {
+    // 核心依赖
+    compileOnly 'io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT'
+    compileOnly 'com.github.MilkBowl:VaultAPI:1.7'
+    compileOnly 'me.clip:placeholderapi:2.11.5'
+
+    // CraftEngine 依赖
+    compileOnly 'net.momirealms:craft-engine-bukkit:0.0.66'
+    compileOnly 'net.momirealms:craft-engine-core:0.0.66'
+
+    // FancyNpcs 依赖
+    compileOnly 'de.oliver:FancyNpcs:2.9.1'
+
+    // [已移除] zMenu 本地依赖
+}
+
+// 资源处理逻辑 (核心安全配置)
+processResources {
+    def props = [version: version]
+    inputs.properties props
+    filteringCharset = 'UTF-8'
+
+    // 1. 只对 .yml 配置文件启用变量替换
+    filesMatching('**/*.yml') {
+        expand props
+    }
+
+    // 2. 其他文件（包括 rust exe/binary）将按原样复制，不会被损坏
+}
+
+// 编译选项
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+}
+
+// 打包配置
+shadowJar {
+    exclude 'META-INF/*.SF'
+    exclude 'META-INF/*.DSA'
+    exclude 'META-INF/*.RSA'
+    
+    archiveClassifier.set('') 
+}
+
+build.dependsOn shadowJar
