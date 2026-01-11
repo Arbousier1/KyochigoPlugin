@@ -20,12 +20,11 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
-
-
+          
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.2.1' 
+          gradle-version: '9.2.1' # 指定您要求的版本
 
       - name: Build with Gradle
         run: gradle build
@@ -34,44 +33,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: KyochigoEconomy-Plugin
+          # 上传 build/libs 下的所有 jar
+          # 使用 ! 排除掉 -plain.jar (不包含依赖的原始jar)，只上传 Shadow 插件生成的全量包
           path: |
             build/libs/*.jar
             !build/libs/*-plain.jar
           if-no-files-found: error
-          retention-days: 7name: Build Plugin
-
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-
-          cache: gradle
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-      - name: Build with Gradle
-        run: ./gradlew build
-
-
-      - name: Upload Jar
-        uses: actions/upload-artifact@v4
-        with:
-          name: KyochigoEconomy-Snapshot
-          path: |
-            build/libs/*.jar
-            !build/libs/*-plain.jar
-          if-no-files-found: error
+          retention-days: 7
