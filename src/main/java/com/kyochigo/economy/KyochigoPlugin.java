@@ -16,8 +16,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * KyochigoEconomy 主类 (v3.0 工业级架构版)
- * 职责：负责插件生命周期管理、核心管理器依赖注入、以及第三方插件高度解耦集成。
+ * KyochigoEconomy 主类 (v3.1 修复版)
+ * 修复：正确注入 Economy 对象，解决 NPE 问题。
  */
 public class KyochigoPlugin extends JavaPlugin {
 
@@ -42,7 +42,9 @@ public class KyochigoPlugin extends JavaPlugin {
 
         long duration = System.currentTimeMillis() - startTime;
         Bukkit.getConsoleSender().sendMessage("§8[§bKyochigo§8] §f系统核心已就绪 §7(" + duration + "ms)");
-        Bukkit.getConsoleSender().sendMessage("§8[§bKyochigo§8] §f交互协议: §dFancyNpcs Action v4.0");
+        if (getServer().getPluginManager().isPluginEnabled("FancyNpcs")) {
+            Bukkit.getConsoleSender().sendMessage("§8[§bKyochigo§8] §f交互协议: §dFancyNpcs Action v4.0");
+        }
     }
 
     private boolean initializePlugin() {
@@ -51,6 +53,7 @@ public class KyochigoPlugin extends JavaPlugin {
             if (!components.initialize(this)) return false;
 
             // 2. 初始化第三方集成 (Vault, FancyNpcs 等)
+            // 这里会将获取到的 Economy 注入回 TransactionManager
             if (!integrations.initialize(this, components)) return false;
 
             // 3. 注册命令
@@ -141,7 +144,8 @@ public class KyochigoPlugin extends JavaPlugin {
             this.marketManager = new MarketManager(plugin, this.craftEngineHook);
             this.marketManager.loadItems();
 
-            // 注意：TransactionManager 的 Economy 会在 Integration 阶段注入
+            // 注意：此时 Economy 尚未加载，传入 null。
+            // 必须确保 PluginIntegrations.initialize 中调用 setEconomy
             this.transactionManager = new TransactionManager(plugin, inventoryManager, 
                 backendManager, null, tradeCache);
 
@@ -182,11 +186,13 @@ public class KyochigoPlugin extends JavaPlugin {
 
         boolean initialize(KyochigoPlugin plugin, PluginComponents components) {
             // 1. Vault 经济检查
-            if (!setupEconomy(plugin)) return false;
+            if (!setupEconomy(plugin)) {
+                plugin.getLogger().severe("未找到 Vault 或经济插件！插件将无法处理交易。");
+                return false;
+            }
 
-            // 2. 将获取到的经济系统注入业务组件
-            // (假设 TransactionManager 增加了 injectEconomy 方法或通过构造后处理)
-            // components.transactionManager().setEconomy(economy);
+            // 2. ★★★ 关键修复：将获取到的经济系统注入 TransactionManager ★★★
+            components.transactionManager().setEconomy(economy);
 
             // 3. FancyNpcs 挂钩
             if (plugin.getServer().getPluginManager().isPluginEnabled("FancyNpcs")) {

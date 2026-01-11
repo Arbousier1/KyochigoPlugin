@@ -4,8 +4,8 @@ import com.kyochigo.economy.KyochigoPlugin;
 import com.kyochigo.economy.TradeData;
 import com.kyochigo.economy.gui.TransactionDialog;
 import com.kyochigo.economy.model.MarketItem;
-import com.kyochigo.economy.utils.CraftEngineHook;
 import net.milkbowl.vault.economy.Economy;
+import org.bukkit.Bukkit;
 import org.bukkit.Sound;
 import org.bukkit.entity.Player;
 
@@ -13,11 +13,12 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * 交易执行管理器 (v3.2 最终修正版)
+ * 交易执行管理器 (v3.3 健壮修正版)
  * <p>
- * 职责：
- * 1. 协调 GUI、后端、Vault 和背包系统。
- * 2. [核心] 实施“汇率锁定”机制，确保玩家看到的预览价格与最终成交价格严格一致（无滑点）。
+ * 修正内容：
+ * 1. 增加 setEconomy 方法以支持延迟注入。
+ * 2. 增加主线程调度，防止异步操作 Bukkit API。
+ * 3. 增强空指针防御。
  */
 public class TransactionManager {
 
@@ -32,16 +33,23 @@ public class TransactionManager {
     private final InventoryManager inventoryManager;
     private final BackendManager backendManager;
     private final HistoryManager historyManager;
-    private final Economy economy;
+    
+    // 移除 final，允许后期注入
+    private Economy economy;
     private final Map<UUID, TradeData> tradeCache;
 
     public TransactionManager(KyochigoPlugin plugin, InventoryManager inv, BackendManager backend, Economy eco, Map<UUID, TradeData> cache) {
         this.plugin = plugin;
         this.inventoryManager = inv;
         this.backendManager = backend;
-        this.economy = eco;
+        this.economy = eco; // 可能为 null，需要后续注入
         this.tradeCache = cache;
         this.historyManager = plugin.getHistoryManager();
+    }
+
+    // ★★★ 关键修复：允许主类在 Vault 加载后注入 Economy ★★★
+    public void setEconomy(Economy economy) {
+        this.economy = economy;
     }
 
     // =========================================================================
@@ -52,33 +60,31 @@ public class TransactionManager {
     public void openSellConfirmDialog(Player p, MarketItem i, int amt) { requestPriceAndOpen(p, i, amt, "sell"); }
 
     private void requestPriceAndOpen(Player player, MarketItem item, int amount, String action) {
-        // [预览阶段] manualEnvIndex = null
-        // 含义：请求后端使用服务器当前的实时环境指数进行报价
-        // isPreview = true (不记录流水)
+        // [预览阶段] 请求后端报价
         backendManager.sendCalculateRequest(player, action, item.getConfigKey(), (double) amount,
                 item.getBasePrice(), item.getLambda(), null, true, response -> {
                     
-                    if (response == null || !response.has("totalPrice")) {
-                        sendMsg(player, ERR_BACKEND);
-                        return;
-                    }
+                    // 切换回主线程处理 UI (防止异步操作报错)
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        if (response == null || !response.has("totalPrice")) {
+                            sendMsg(player, ERR_BACKEND);
+                            return;
+                        }
 
-                    double unitPrice = response.get("unitPriceAvg").getAsDouble();
-                    
-                    // [关键] 记录后端此刻返回的 envIndex
-                    // 这个值将被写入快照，作为本次会话的“锁定汇率”
-                    double currentEnv = response.get("envIndex").getAsDouble();
+                        double unitPrice = response.get("unitPriceAvg").getAsDouble();
+                        double currentEnv = response.get("envIndex").getAsDouble(); // 锁定汇率
 
-                    TradeData data = new TradeData(item.getConfigKey(), item.getPlainDisplayName(), 
-                        item.getMaterial().name(), amount, unitPrice, 
-                        response.get("totalPrice").getAsDouble(), 
-                        currentEnv, action.equals("buy"));
+                        TradeData data = new TradeData(item.getConfigKey(), item.getPlainDisplayName(), 
+                            item.getMaterial().name(), amount, unitPrice, 
+                            response.get("totalPrice").getAsDouble(), 
+                            currentEnv, action.equals("buy"));
 
-                    tradeCache.put(player.getUniqueId(), data);
+                        tradeCache.put(player.getUniqueId(), data);
 
-                    // 打开 GUI 供玩家确认
-                    if (data.isBuy) TransactionDialog.openBuyConfirm(player, item, amount, unitPrice);
-                    else TransactionDialog.openSellConfirm(player, item, amount, unitPrice);
+                        // 打开 GUI
+                        if (data.isBuy) TransactionDialog.openBuyConfirm(player, item, amount, unitPrice);
+                        else TransactionDialog.openSellConfirm(player, item, amount, unitPrice);
+                    });
                 });
     }
 
@@ -93,39 +99,40 @@ public class TransactionManager {
         UUID uuid = player.getUniqueId();
         TradeData snapshot = tradeCache.get(uuid);
 
-        // 1. 会话检查
         if (snapshot == null) {
             sendMsg(player, ERR_EXPIRED);
             return;
         }
 
-        // 2. 动态限额调整 (可能因玩家在犹豫期内其他交易导致额度变动)
+        // 检查 Economy 是否就绪
+        if (economy == null) {
+            sendMsg(player, "§c严重错误：经济系统未连接，请联系管理员。");
+            plugin.getLogger().severe("Economy not injected into TransactionManager!");
+            return;
+        }
+
         int finalAmount = calculateAdjustedAmount(player, item, amount);
         if (finalAmount <= 0) return;
 
-        // 3. 资产物理准入预检 (背包空间/物品数量)
         if (!isAssetCheckPassed(player, item, finalAmount, snapshot.isBuy)) return;
 
-        // 4. 后端最终共识锁定 (Double Check)
         sendMsg(player, MSG_LOCKING);
         
-        // [核心修复] 传递 snapshot.envIndex 作为 manualEnvIndex
-        // 含义：强制 Rust 后端使用快照生成时的环境指数进行最终计价
-        // isPreview = false (正式交易，记录流水并持久化)
+        // [核心] 锁定汇率请求
         backendManager.sendCalculateRequest(player, snapshot.isBuy ? "buy" : "sell", item.getConfigKey(), 
             (double) finalAmount, item.getBasePrice(), item.getLambda(), snapshot.envIndex, false, response -> {
                 
-                if (response == null || !response.has("totalPrice")) {
-                    sendMsg(player, ERR_LOCK_FAIL);
-                    tradeCache.remove(uuid); // 发生严重错误，销毁会话
-                    return;
-                }
-                
-                // 获取最终核算的金额
-                double finalPrice = response.get("totalPrice").getAsDouble();
-                
-                // 进入资产交割环节
-                finalizeAssetSwap(player, item, snapshot, finalAmount, finalPrice);
+                // 切换回主线程执行交易
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (response == null || !response.has("totalPrice")) {
+                        sendMsg(player, ERR_LOCK_FAIL);
+                        tradeCache.remove(uuid);
+                        return;
+                    }
+                    
+                    double finalPrice = response.get("totalPrice").getAsDouble();
+                    finalizeAssetSwap(player, item, snapshot, finalAmount, finalPrice);
+                });
             });
     }
 
@@ -134,7 +141,6 @@ public class TransactionManager {
     // =========================================================================
 
     private void finalizeAssetSwap(Player player, MarketItem item, TradeData snapshot, int amount, double price) {
-        // [最后一道防线] 确保扣款前再次验证余额 (防止异步期间把钱转走了)
         if (snapshot.isBuy && !economy.has(player, price)) {
             sendMsg(player, "§c余额不足，交易取消。");
             tradeCache.remove(player.getUniqueId());
@@ -149,25 +155,21 @@ public class TransactionManager {
             handleTransactionSuccess(player, item, amount, price, snapshot.isBuy);
         }
         
-        // 交易完成，移除快照
         tradeCache.remove(player.getUniqueId());
     }
 
     private boolean performBuyAction(Player player, MarketItem item, int amount, double price) {
-        // 1. 扣钱
         economy.withdrawPlayer(player, price);
-        // 2. 给货 (利用 InventoryManager v3.1 的安全发放逻辑)
         inventoryManager.giveItems(player, item, amount);
         return true;
     }
 
     private boolean performSellAction(Player player, MarketItem item, int amount, double price) {
-        // 1. 扣货 (利用 InventoryManager v3.1 的安全扣除逻辑)
+        // 使用具体的移除逻辑，避免 NBT 问题
         if (!inventoryManager.removeItems(player, item, amount)) {
-            sendMsg(player, "§c背包内物品变动，交易取消。");
+            sendMsg(player, "§c背包内物品不足或不匹配。");
             return false;
         }
-        // 2. 给钱
         economy.depositPlayer(player, price);
         return true;
     }
@@ -178,7 +180,7 @@ public class TransactionManager {
 
     private int calculateAdjustedAmount(Player player, MarketItem item, int amount) {
         int limit = plugin.getConfiguration().getItemDailyLimit(item.getConfigKey());
-        if (limit <= 0) return amount; // 无限制
+        if (limit <= 0) return amount;
 
         int traded = historyManager.getDailyTradeCount(player.getUniqueId().toString(), item.getConfigKey());
         
@@ -197,13 +199,13 @@ public class TransactionManager {
 
     private boolean isAssetCheckPassed(Player player, MarketItem item, int amount, boolean isBuy) {
         if (isBuy) {
-            // 检查背包空间 (无副作用检查)
+            // 需要 InventoryManager 提供此方法
+            // 如果没有，可以简单判断 player.getInventory().firstEmpty() != -1
             if (!inventoryManager.hasSpaceForItem(player, item, amount)) {
                 sendMsg(player, "§c背包空间不足，请整理后再试。");
                 return false;
             }
         } else {
-            // 检查物品持有量
             if (!inventoryManager.hasEnoughItems(player, item, amount)) {
                 sendMsg(player, "§c物品数量不足或不匹配 (请检查NBT/耐久)。");
                 return false;
@@ -220,8 +222,6 @@ public class TransactionManager {
         
         sendMsg(p, String.format("%s！ %s%.2f", actionText, moneyText, price));
         
-        // 记录到本地 SQLite/YML 历史 (用于限额统计)
-        // 注意：详细的流水记录已由 Rust 后端处理，这里仅做轻量级统计
         historyManager.incrementTradeCount(p.getUniqueId().toString(), item.getConfigKey(), amt);
         historyManager.saveAsync();
     }
