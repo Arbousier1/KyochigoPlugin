@@ -33,16 +33,12 @@ public class TradeSelectorMenu implements Listener {
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private static final NamespacedKey MENU_KEY = new NamespacedKey("kyochigo", "trade_menu");
     
-    private static final int ITEMS_PER_PAGE = 45; 
+    private static final int ITEMS_PER_PAGE = 45; // 前 5 行放物品
     private static final Map<UUID, String> playerCurrentCategory = new ConcurrentHashMap<>();
     private static final Map<UUID, Integer> playerCurrentPage = new ConcurrentHashMap<>();
 
     private static final ItemStack BORDER_PANE = createBorderPane();
 
-    /**
-     * 适配 MarketManager: 
-     * 在打开菜单前，建议确保价格已经通过 MarketManager 的 fetchBulkPrices 更新过。
-     */
     public static void openItemSelect(Player player, String categoryId) {
         openItemSelect(player, categoryId, 0);
     }
@@ -50,7 +46,7 @@ public class TradeSelectorMenu implements Listener {
     public static void openItemSelect(Player player, String categoryId, int page) {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
         
-        // 从 MarketManager 获取当前分类下的所有物品
+        // 获取分类物品并分页
         List<MarketItem> items = plugin.getMarketManager().getAllItems().stream()
                 .filter(i -> i.getCategory().equalsIgnoreCase(categoryId))
                 .collect(Collectors.toList());
@@ -65,16 +61,18 @@ public class TradeSelectorMenu implements Listener {
         Component title = MM.deserialize("<gradient:#40E0D0:#008080>商业柜台 » " + categoryName + "</gradient> <gray>(" + (page + 1) + "/" + totalPages + ")");
         Inventory inv = Bukkit.createInventory(null, 54, title);
 
-        // 基础布局填充
+        // --- 1. 渲染底部功能区 (45-53号位) ---
+        // 先铺满背景
         for (int i = 45; i < 54; i++) inv.setItem(i, BORDER_PANE);
 
-        inv.setItem(48, createNavButton(Material.ARROW, "<aqua>上一页", "prev", page > 0));
-        inv.setItem(49, createNavButton(Material.NETHER_STAR, "<yellow>刷新行情", "refresh", true));
-        inv.setItem(50, createNavButton(Material.ARROW, "<aqua>下一页", "next", page < totalPages - 1));
+        // 导航与操作
         inv.setItem(45, createNavButton(Material.IRON_DOOR, "<red>返回主柜台", "back", true));
+        inv.setItem(48, createNavButton(Material.ARROW, "<aqua>上一页", "prev", page > 0));
+        inv.setItem(49, createNavButton(Material.NETHER_STAR, "<yellow>刷新单价", "refresh", true));
+        inv.setItem(50, createNavButton(Material.ARROW, "<aqua>下一页", "next", page < totalPages - 1));
         inv.setItem(53, createNavButton(Material.BARRIER, "<gray>关闭菜单", "close", true));
 
-        // 渲染物品
+        // --- 2. 渲染商品区 (0-44号位) ---
         int startIdx = page * ITEMS_PER_PAGE;
         int endIdx = Math.min(startIdx + ITEMS_PER_PAGE, items.size());
         
@@ -124,8 +122,16 @@ public class TradeSelectorMenu implements Listener {
             case "next" -> openItemSelect(player, cat, page + 1);
             case "prev" -> openItemSelect(player, cat, page - 1);
             case "refresh" -> {
-                // 适配 MarketManager: 刷新时调用 MarketManager 的批量拉取逻辑
-                KyochigoPlugin.getInstance().getMarketManager().fetchMarketPricesAndOpenGui(player, false);
+                KyochigoPlugin plugin = KyochigoPlugin.getInstance();
+                List<String> itemIds = plugin.getMarketManager().getAllItems().stream()
+                        .map(MarketItem::getConfigKey)
+                        .collect(Collectors.toList());
+
+                // 异步请求价格后重绘
+                plugin.getBackendManager().fetchBulkPrices(itemIds, response -> {
+                    if (response != null) plugin.getMarketManager().updateInternalData(response);
+                    Bukkit.getScheduler().runTask(plugin, () -> openItemSelect(player, cat, page));
+                });
             }
             case "back" -> TransactionDialog.openEntryMenu(player, null);
             case "close" -> player.closeInventory();
@@ -142,43 +148,32 @@ public class TradeSelectorMenu implements Listener {
         }
     }
 
-    /**
-     * 构建物品图标 - 完美对齐 MarketManager 数据
-     */
     private static ItemStack buildMarketItemStack(MarketItem item, KyochigoPlugin plugin) {
-        // 使用 MarketManager 统一提供的图标获取方式
         ItemStack stack = plugin.getMarketManager().getItemIcon(item);
         ItemMeta meta = stack.getItemMeta();
 
         List<Component> lore = new ArrayList<>();
         lore.add(Component.empty());
         
-        // 显示当前市场环境状态 (数据来源于 MarketManager 缓存)
         double envIndex = plugin.getMarketManager().getLastEnvIndex();
         String envNote = plugin.getMarketManager().getLastEnvNote();
-        
-        lore.add(MM.deserialize("<gray>市场环境: <white>" + envNote + "</white> (<aqua>x" + String.format("%.2f", envIndex) + "</aqua>)"));
+        lore.add(MM.deserialize("<gray>实时状态: <white>" + envNote + "</white> <aqua>(x" + String.format("%.2f", envIndex) + ")</aqua>"));
         lore.add(Component.empty());
 
-        // 价格对齐：直接读取 MarketItem 的实时价格，不进行二次运算
-        // 这里的 getBuyPrice/getSellPrice 应该直接返回 MarketManager.updateInternalData 注入的 temp 值
+        // 直接读取更新后的单价
         double displayBuy = item.getBuyPrice();
         double displaySell = item.getSellPrice();
 
-        lore.add(MM.deserialize("<white> 采购单价 <green>» " + String.format("%.2f", displayBuy) + " ⛁</green>"));
-        lore.add(MM.deserialize("<white> 出售单价 <gold>» " + String.format("%.2f", displaySell) + " ⛁</gold>"));
+        lore.add(MM.deserialize("<white> 采购支付 <green>» " + String.format("%.2f", displayBuy) + " ⛁</green>"));
+        lore.add(MM.deserialize("<white> 出售获利 <gold>» " + String.format("%.2f", displaySell) + " ⛁</gold>"));
         
         lore.add(Component.empty());
-        lore.add(MM.deserialize("<gradient:#40E0D0:#00F260><b>左键点击 ➔ 采购物资</b></gradient>"));
-        lore.add(MM.deserialize("<gradient:#F2994A:#F2C94C><b>右键点击 ➔ 出售资产</b></gradient>"));
-        
-        // 添加物品流水号标识（与 MarketManager 加载的 key 对齐）
+        lore.add(MM.deserialize("<gradient:#40E0D0:#00F260><b>左键点击 ➔ 发起采购</b></gradient>"));
+        lore.add(MM.deserialize("<gradient:#F2994A:#F2C94C><b>右键点击 ➔ 发起出售</b></gradient>"));
         lore.add(Component.empty());
         lore.add(MM.deserialize("<dark_gray>Serial: " + item.getConfigKey().toUpperCase() + "</dark_gray>"));
 
         meta.lore(lore);
-        
-        // 视觉强化
         meta.addEnchant(Enchantment.UNBREAKING, 1, true);
         meta.addItemFlags(ItemFlag.HIDE_ENCHANTS, ItemFlag.HIDE_ATTRIBUTES);
         
@@ -193,15 +188,13 @@ public class TradeSelectorMenu implements Listener {
         return stack;
     }
 
-    // ... createNavButton, createBorderPane, isKyochigoMenu, getCategoryNameRaw 保持不变 ...
-
     private static ItemStack createNavButton(Material mat, String name, String action, boolean enabled) {
         if (!enabled) return BORDER_PANE;
         ItemStack stack = new ItemStack(mat);
         ItemMeta meta = stack.getItemMeta();
         meta.displayName(MM.deserialize(name).decoration(TextDecoration.ITALIC, false).decorate(TextDecoration.BOLD));
         meta.getPersistentDataContainer().set(MENU_KEY, PersistentDataType.STRING, action);
-        meta.lore(Collections.singletonList(MM.deserialize("<gray>点击执行此导航操作</gray>")));
+        meta.lore(Collections.singletonList(MM.deserialize("<gray>点击执行导航操作</gray>")));
         stack.setItemMeta(meta);
         return stack;
     }
@@ -209,8 +202,10 @@ public class TradeSelectorMenu implements Listener {
     private static ItemStack createBorderPane() {
         ItemStack item = new ItemStack(Material.CYAN_STAINED_GLASS_PANE);
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(Component.empty());
-        item.setItemMeta(meta);
+        if (meta != null) {
+            meta.displayName(Component.empty());
+            item.setItemMeta(meta);
+        }
         return item;
     }
 
