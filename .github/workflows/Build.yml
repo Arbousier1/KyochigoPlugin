@@ -8,6 +8,7 @@ on:
 
 jobs:
   build:
+    name: Build with Gradle 9.2.1
     runs-on: ubuntu-latest
 
     steps:
@@ -19,22 +20,57 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
-          # 启用 Gradle 缓存，加速构建
+
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.2.1' 
+
+      - name: Build with Gradle
+        run: gradle build
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KyochigoEconomy-Plugin
+          path: |
+            build/libs/*.jar
+            !build/libs/*-plain.jar
+          if-no-files-found: error
+          retention-days: 7name: Build Plugin
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
           cache: gradle
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
-
       - name: Build with Gradle
         run: ./gradlew build
 
-      # 上传构建好的 Jar 包
+
       - name: Upload Jar
         uses: actions/upload-artifact@v4
         with:
           name: KyochigoEconomy-Snapshot
-          # Gradle shadowJar 生成的文件通常在这里
-          # !-all.jar 排除掉那个巨大的 uber-jar (如果 shadowJar配置了 classifier则不需要这行)
           path: |
             build/libs/*.jar
             !build/libs/*-plain.jar
