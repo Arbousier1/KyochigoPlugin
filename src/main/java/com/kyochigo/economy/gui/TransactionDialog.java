@@ -23,11 +23,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 交易确认对话框 (v4.0 核心重构版)
- * 优化内容：
- * 1. 统一买卖逻辑，代码量减少 40%
- * 2. 抽象 Dialog 构建器，提升可维护性
- * 3. 保持所有原有功能 (满包购买/全量出售)
+ * 交易确认对话框 (v4.1 修复版)
+ * 修复：重新公开 openBuyConfirm 和 openSellConfirm 以供 TransactionManager 调用
  */
 public class TransactionDialog {
 
@@ -99,8 +96,30 @@ public class TransactionDialog {
         showTransactionDialog(player, item, ACTION_TITLE, desc, actions);
     }
 
+    // ========================================================================
+    // 兼容性接口 (Bridge Methods) - 修复编译错误的关键
+    // ========================================================================
+
     /**
-     * 统一交易确认逻辑 (合并了原本的 BuyConfirm 和 SellConfirm)
+     * 打开购买确认框 (兼容 TransactionManager)
+     */
+    public static void openBuyConfirm(Player player, MarketItem item, int amount, double price) {
+        openTransactionConfirm(player, item, amount, price, true);
+    }
+
+    /**
+     * 打开售卖确认框 (兼容 TransactionManager)
+     */
+    public static void openSellConfirm(Player player, MarketItem item, int amount, double price) {
+        openTransactionConfirm(player, item, amount, price, false);
+    }
+
+    // ========================================================================
+    // 内部核心逻辑
+    // ========================================================================
+
+    /**
+     * 统一交易确认逻辑
      * @param isBuy true=购买, false=售卖
      */
     private static void openTransactionConfirm(Player player, MarketItem item, int amount, double price, boolean isBuy) {
@@ -132,10 +151,6 @@ public class TransactionDialog {
 
         showTransactionDialog(player, item, isBuy ? BUY_TITLE : SELL_TITLE, content, actions);
     }
-
-    // ========================================================================
-    // 核心构建器 (Core Builders) - 极大地减少了重复代码
-    // ========================================================================
 
     private static void showTransactionDialog(Player player, MarketItem item, String title, Component content, List<ActionButton> actions) {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();

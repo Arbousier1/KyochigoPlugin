@@ -1,228 +1,230 @@
-package com.kyochigo.economy.gui;
+package com.kyochigo.economy.managers;
 
 import com.kyochigo.economy.KyochigoPlugin;
+import com.kyochigo.economy.TradeData;
+import com.kyochigo.economy.gui.TransactionDialog;
 import com.kyochigo.economy.model.MarketItem;
-import io.papermc.paper.dialog.Dialog;
-import io.papermc.paper.registry.data.dialog.ActionButton;
-import io.papermc.paper.registry.data.dialog.DialogBase;
-import io.papermc.paper.registry.data.dialog.DialogRegistryEntry;
-import io.papermc.paper.registry.data.dialog.body.DialogBody;
-import io.papermc.paper.registry.data.dialog.type.DialogType;
-import io.papermc.paper.registry.data.dialog.action.DialogAction;
-import io.papermc.paper.registry.data.dialog.action.DialogActionCallback;
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.TextComponent;
-import net.kyori.adventure.text.event.ClickCallback;
-import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
-import net.kyori.adventure.text.minimessage.MiniMessage;
+import com.kyochigo.economy.utils.CraftEngineHook;
+import net.milkbowl.vault.economy.Economy;
+import org.bukkit.Sound;
 import org.bukkit.entity.Player;
-import org.bukkit.inventory.ItemStack;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 /**
- * 交易确认对话框 (v4.1 修复版)
- * 修复：重新公开 openBuyConfirm 和 openSellConfirm 以供 TransactionManager 调用
+ * 交易执行管理器 (v3.2 最终修正版)
+ * <p>
+ * 职责：
+ * 1. 协调 GUI、后端、Vault 和背包系统。
+ * 2. [核心] 实施“汇率锁定”机制，确保玩家看到的预览价格与最终成交价格严格一致（无滑点）。
  */
-public class TransactionDialog {
+public class TransactionManager {
 
-    private static final ClickCallback.Options DEFAULT_OPTIONS = ClickCallback.Options.builder().build();
-    private static final MiniMessage MM = MiniMessage.miniMessage();
+    // --- 消息常量 ---
+    private static final String PREFIX = "§8[§bKyochigo§8] ";
+    private static final String ERR_EXPIRED = "§c交易会话已过期，请重新打开菜单。";
+    private static final String ERR_BACKEND = "§c计算失败：后端未响应。";
+    private static final String ERR_LOCK_FAIL = "§c§l致命错误：§f汇率锁定失败，交易拦截！";
+    private static final String MSG_LOCKING = "§7正在与核心同步交易数据...";
 
-    // 标题与常量
-    private static final String SELL_TITLE = "<gold><b>售卖确认</b></gold>";
-    private static final String BUY_TITLE = "<aqua><b>购买确认</b></aqua>";
-    private static final String ACTION_TITLE = "<dark_aqua><b>选择交易操作</b></dark_aqua>";
-    private static final String DIVIDER = "<dark_gray>────────────────────────────────</dark_gray>";
-    private static final String CURRENCY = " ⛁";
+    private final KyochigoPlugin plugin;
+    private final InventoryManager inventoryManager;
+    private final BackendManager backendManager;
+    private final HistoryManager historyManager;
+    private final Economy economy;
+    private final Map<UUID, TradeData> tradeCache;
 
-    // 按钮组件
-    private static final Component CONFIRM_SELL = MM.deserialize("<green>[ 确认售卖 ]</green>");
-    private static final Component CONFIRM_BUY = MM.deserialize("<green>[ 支付并获取 ]</green>");
-    private static final Component CANCEL = MM.deserialize("<gray>[ 取消 ]</gray>");
-    private static final Component INSUFFICIENT_FUNDS = MM.deserialize("<gray>资金不足</gray>");
-    private static final Component INSUFFICIENT_WARNING = MM.deserialize("<red><b>余额不足，请调整购买数量。</b></red>");
+    public TransactionManager(KyochigoPlugin plugin, InventoryManager inv, BackendManager backend, Economy eco, Map<UUID, TradeData> cache) {
+        this.plugin = plugin;
+        this.inventoryManager = inv;
+        this.backendManager = backend;
+        this.economy = eco;
+        this.tradeCache = cache;
+        this.historyManager = plugin.getHistoryManager();
+    }
 
-    /**
-     * 打开操作选择菜单 (统一入口)
-     */
-    public static void openActionMenu(Player player, MarketItem item) {
-        KyochigoPlugin plugin = KyochigoPlugin.getInstance();
-        double buyPrice = item.getBuyPrice();
-        double sellPrice = item.getSellPrice();
+    // =========================================================================
+    // 1. 弹窗与预检 (UI Entry - Preview Phase)
+    // =========================================================================
 
-        List<ActionButton> actions = new ArrayList<>();
+    public void openBuyConfirmDialog(Player p, MarketItem i, int amt) { requestPriceAndOpen(p, i, amt, "buy"); }
+    public void openSellConfirmDialog(Player p, MarketItem i, int amt) { requestPriceAndOpen(p, i, amt, "sell"); }
 
-        // 1. 购买组
-        actions.add(createBtn("<green>购买 x1</green>", 
-            (v, a) -> openTransactionConfirm((Player)a, item, 1, buyPrice, true)));
+    private void requestPriceAndOpen(Player player, MarketItem item, int amount, String action) {
+        // [预览阶段] manualEnvIndex = null
+        // 含义：请求后端使用服务器当前的实时环境指数进行报价
+        // isPreview = true (不记录流水)
+        backendManager.sendCalculateRequest(player, action, item.getConfigKey(), (double) amount,
+                item.getBasePrice(), item.getLambda(), null, true, response -> {
+                    
+                    if (response == null || !response.has("totalPrice")) {
+                        sendMsg(player, ERR_BACKEND);
+                        return;
+                    }
+
+                    double unitPrice = response.get("unitPriceAvg").getAsDouble();
+                    
+                    // [关键] 记录后端此刻返回的 envIndex
+                    // 这个值将被写入快照，作为本次会话的“锁定汇率”
+                    double currentEnv = response.get("envIndex").getAsDouble();
+
+                    TradeData data = new TradeData(item.getConfigKey(), item.getPlainDisplayName(), 
+                        item.getMaterial().name(), amount, unitPrice, 
+                        response.get("totalPrice").getAsDouble(), 
+                        currentEnv, action.equals("buy"));
+
+                    tradeCache.put(player.getUniqueId(), data);
+
+                    // 打开 GUI 供玩家确认
+                    if (data.isBuy) TransactionDialog.openBuyConfirm(player, item, amount, unitPrice);
+                    else TransactionDialog.openSellConfirm(player, item, amount, unitPrice);
+                });
+    }
+
+    // =========================================================================
+    // 2. 核心执行流 (Execution Phase - Commit)
+    // =========================================================================
+
+    public void executeBuy(Player p, MarketItem i, int a, double pr) { executeTransaction(p, i, a); }
+    public void executeSell(Player p, MarketItem i, int a, double pr) { executeTransaction(p, i, a); }
+
+    public void executeTransaction(Player player, MarketItem item, int amount) {
+        UUID uuid = player.getUniqueId();
+        TradeData snapshot = tradeCache.get(uuid);
+
+        // 1. 会话检查
+        if (snapshot == null) {
+            sendMsg(player, ERR_EXPIRED);
+            return;
+        }
+
+        // 2. 动态限额调整 (可能因玩家在犹豫期内其他交易导致额度变动)
+        int finalAmount = calculateAdjustedAmount(player, item, amount);
+        if (finalAmount <= 0) return;
+
+        // 3. 资产物理准入预检 (背包空间/物品数量)
+        if (!isAssetCheckPassed(player, item, finalAmount, snapshot.isBuy)) return;
+
+        // 4. 后端最终共识锁定 (Double Check)
+        sendMsg(player, MSG_LOCKING);
         
-        actions.add(createBtn("<green>购买 x64</green>", 
-            (v, a) -> openTransactionConfirm((Player)a, item, 64, buyPrice, true)));
+        // [核心修复] 传递 snapshot.envIndex 作为 manualEnvIndex
+        // 含义：强制 Rust 后端使用快照生成时的环境指数进行最终计价
+        // isPreview = false (正式交易，记录流水并持久化)
+        backendManager.sendCalculateRequest(player, snapshot.isBuy ? "buy" : "sell", item.getConfigKey(), 
+            (double) finalAmount, item.getBasePrice(), item.getLambda(), snapshot.envIndex, false, response -> {
+                
+                if (response == null || !response.has("totalPrice")) {
+                    sendMsg(player, ERR_LOCK_FAIL);
+                    tradeCache.remove(uuid); // 发生严重错误，销毁会话
+                    return;
+                }
+                
+                // 获取最终核算的金额
+                double finalPrice = response.get("totalPrice").getAsDouble();
+                
+                // 进入资产交割环节
+                finalizeAssetSwap(player, item, snapshot, finalAmount, finalPrice);
+            });
+    }
 
-        actions.add(createBtn("<green>购买满背包</green>", (v, a) -> {
-            Player p = (Player) a;
-            int maxSpace = getInventoryFreeSpace(p, plugin.getMarketManager().getItemIcon(item));
-            if (maxSpace > 0) openTransactionConfirm(p, item, maxSpace, buyPrice, true);
-            else p.sendMessage(MM.deserialize("<red>背包已满，无法购买更多物品。</red>"));
-        }));
+    // =========================================================================
+    // 3. 资产交换逻辑 (Asset Swapping)
+    // =========================================================================
 
-        // 2. 售卖组
-        actions.add(createBtn("<gold>售卖 x1</gold>", 
-            (v, a) -> openTransactionConfirm((Player)a, item, 1, sellPrice, false)));
+    private void finalizeAssetSwap(Player player, MarketItem item, TradeData snapshot, int amount, double price) {
+        // [最后一道防线] 确保扣款前再次验证余额 (防止异步期间把钱转走了)
+        if (snapshot.isBuy && !economy.has(player, price)) {
+            sendMsg(player, "§c余额不足，交易取消。");
+            tradeCache.remove(player.getUniqueId());
+            return;
+        }
+
+        boolean isSuccess = snapshot.isBuy 
+                ? performBuyAction(player, item, amount, price) 
+                : performSellAction(player, item, amount, price);
+
+        if (isSuccess) {
+            handleTransactionSuccess(player, item, amount, price, snapshot.isBuy);
+        }
         
-        actions.add(createBtn("<gold>售卖 x64</gold>", 
-            (v, a) -> openTransactionConfirm((Player)a, item, 64, sellPrice, false)));
-
-        actions.add(createBtn("<gold>售卖全部</gold>", (v, a) -> {
-            Player p = (Player) a;
-            int count = countPlayerItems(p, item, plugin);
-            if (count > 0) openTransactionConfirm(p, item, count, sellPrice, false);
-            else p.sendMessage(MM.deserialize("<red>你背包里没有该物品。</red>"));
-        }));
-
-        // 3. 取消
-        actions.add(ActionButton.builder(CANCEL).build());
-
-        // 描述信息
-        Component desc = Component.text()
-                .append(MM.deserialize("<gray>购买单价：</gray><white>" + String.format("%.2f", buyPrice) + "</white>"))
-                .append(Component.newline())
-                .append(MM.deserialize("<gray>售卖单价：</gray><white>" + String.format("%.2f", sellPrice) + "</white>"))
-                .build();
-
-        showTransactionDialog(player, item, ACTION_TITLE, desc, actions);
+        // 交易完成，移除快照
+        tradeCache.remove(player.getUniqueId());
     }
 
-    // ========================================================================
-    // 兼容性接口 (Bridge Methods) - 修复编译错误的关键
-    // ========================================================================
-
-    /**
-     * 打开购买确认框 (兼容 TransactionManager)
-     */
-    public static void openBuyConfirm(Player player, MarketItem item, int amount, double price) {
-        openTransactionConfirm(player, item, amount, price, true);
+    private boolean performBuyAction(Player player, MarketItem item, int amount, double price) {
+        // 1. 扣钱
+        economy.withdrawPlayer(player, price);
+        // 2. 给货 (利用 InventoryManager v3.1 的安全发放逻辑)
+        inventoryManager.giveItems(player, item, amount);
+        return true;
     }
 
-    /**
-     * 打开售卖确认框 (兼容 TransactionManager)
-     */
-    public static void openSellConfirm(Player player, MarketItem item, int amount, double price) {
-        openTransactionConfirm(player, item, amount, price, false);
+    private boolean performSellAction(Player player, MarketItem item, int amount, double price) {
+        // 1. 扣货 (利用 InventoryManager v3.1 的安全扣除逻辑)
+        if (!inventoryManager.removeItems(player, item, amount)) {
+            sendMsg(player, "§c背包内物品变动，交易取消。");
+            return false;
+        }
+        // 2. 给钱
+        economy.depositPlayer(player, price);
+        return true;
     }
 
-    // ========================================================================
-    // 内部核心逻辑
-    // ========================================================================
+    // =========================================================================
+    // 4. 辅助校验器 (Validators & Utils)
+    // =========================================================================
 
-    /**
-     * 统一交易确认逻辑
-     * @param isBuy true=购买, false=售卖
-     */
-    private static void openTransactionConfirm(Player player, MarketItem item, int amount, double price, boolean isBuy) {
-        KyochigoPlugin plugin = KyochigoPlugin.getInstance();
+    private int calculateAdjustedAmount(Player player, MarketItem item, int amount) {
+        int limit = plugin.getConfiguration().getItemDailyLimit(item.getConfigKey());
+        if (limit <= 0) return amount; // 无限制
+
+        int traded = historyManager.getDailyTradeCount(player.getUniqueId().toString(), item.getConfigKey());
         
-        // 构建内容与状态检查
-        double balance = plugin.getEconomy().getBalance(player);
-        Component content = buildTransactionContent(item, amount, price, balance, isBuy);
+        if (traded >= limit) {
+            sendMsg(player, "§c§l交易拒绝！§7今日额度已达上限 (§f" + limit + "§7)。");
+            return 0;
+        }
         
-        // 逻辑判定
-        boolean canProceed = !isBuy || (balance >= amount * price);
-        Component confirmBtnText = isBuy ? CONFIRM_BUY : CONFIRM_SELL;
-        if (!canProceed) confirmBtnText = INSUFFICIENT_FUNDS;
-
-        // 回调逻辑
-        DialogActionCallback callback = (view, audience) -> {
-            if (audience instanceof Player p) {
-                if (isBuy) plugin.getTransactionManager().executeBuy(p, item, amount, price);
-                else plugin.getTransactionManager().executeSell(p, item, amount, price);
-            }
-        };
-
-        List<ActionButton> actions = List.of(
-            ActionButton.builder(confirmBtnText)
-                .action(canProceed ? DialogAction.customClick(callback, DEFAULT_OPTIONS) : null)
-                .build(),
-            ActionButton.builder(CANCEL).build()
-        );
-
-        showTransactionDialog(player, item, isBuy ? BUY_TITLE : SELL_TITLE, content, actions);
+        if (traded + amount > limit) {
+            int adjusted = limit - traded;
+            sendMsg(player, "§e提示: §7因触发限额，交易数量已自动调整为 §a" + adjusted + " §7个。");
+            return adjusted;
+        }
+        return amount;
     }
 
-    private static void showTransactionDialog(Player player, MarketItem item, String title, Component content, List<ActionButton> actions) {
-        KyochigoPlugin plugin = KyochigoPlugin.getInstance();
-        player.showDialog(Dialog.create(factory -> {
-            DialogRegistryEntry.Builder builder = factory.empty();
-            ItemStack icon = plugin.getMarketManager().getItemIcon(item);
-            
-            builder.base(DialogBase.builder(MM.deserialize(title))
-                    .body(List.of(DialogBody.item(icon)
-                            .description(DialogBody.plainMessage(content)).build()))
-                    .build());
-            
-            // 自动判断：如果是2个按钮则为 Confirmation 布局，否则为 MultiAction 列表布局
-            if (actions.size() == 2) {
-                builder.type(DialogType.confirmation(actions.get(0), actions.get(1)));
-            } else {
-                builder.type(DialogType.multiAction(actions).build());
-            }
-        }));
-    }
-
-    private static Component buildTransactionContent(MarketItem item, int amount, double price, double balance, boolean isBuy) {
-        String action = isBuy ? "购买" : "售卖";
-        double total = amount * price;
-        KyochigoPlugin plugin = KyochigoPlugin.getInstance();
-
-        TextComponent.Builder builder = Component.text()
-                .append(MM.deserialize("<gray>确认" + action + "以下物品：</gray>")).append(Component.newline())
-                .append(item.getDisplayNameComponent(plugin.getMarketManager().getCraftEngineHook()).decorate(TextDecoration.BOLD))
-                .append(Component.text(" x" + amount, NamedTextColor.WHITE)).append(Component.newline())
-                .append(MM.deserialize(DIVIDER)).append(Component.newline());
-
+    private boolean isAssetCheckPassed(Player player, MarketItem item, int amount, boolean isBuy) {
         if (isBuy) {
-            builder.append(MM.deserialize("<gray>所需支出：</gray><red>-" + String.format("%.2f", total) + CURRENCY + "</red>"))
-                   .append(Component.newline())
-                   .append(MM.deserialize("<gray>当前余额：</gray><white>" + String.format("%.2f", balance) + CURRENCY + "</white>"));
-            
-            if (balance < total) builder.append(Component.newline()).append(INSUFFICIENT_WARNING);
+            // 检查背包空间 (无副作用检查)
+            if (!inventoryManager.hasSpaceForItem(player, item, amount)) {
+                sendMsg(player, "§c背包空间不足，请整理后再试。");
+                return false;
+            }
         } else {
-            builder.append(MM.deserialize("<gray>实时报价：</gray><white>" + String.format("%.2f", price) + CURRENCY + "</white>"))
-                   .append(Component.newline())
-                   .append(MM.deserialize("<gray>预计获得：</gray><green>+" + String.format("%.2f", total) + CURRENCY + "</green>"));
+            // 检查物品持有量
+            if (!inventoryManager.hasEnoughItems(player, item, amount)) {
+                sendMsg(player, "§c物品数量不足或不匹配 (请检查NBT/耐久)。");
+                return false;
+            }
         }
-        return builder.build();
+        return true;
     }
 
-    // ========================================================================
-    // 工具方法 (Helpers)
-    // ========================================================================
-
-    private static ActionButton createBtn(String label, DialogActionCallback callback) {
-        return ActionButton.builder(MM.deserialize(label))
-                .action(DialogAction.customClick(callback, DEFAULT_OPTIONS))
-                .build();
+    private void handleTransactionSuccess(Player p, MarketItem item, int amt, double price, boolean isBuy) {
+        p.playSound(p.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1f, 1f);
+        
+        String actionText = isBuy ? "§a§l购买成功" : "§a§l出售成功";
+        String moneyText = isBuy ? "§f花费 §e" : "§f获得 §e";
+        
+        sendMsg(p, String.format("%s！ %s%.2f", actionText, moneyText, price));
+        
+        // 记录到本地 SQLite/YML 历史 (用于限额统计)
+        // 注意：详细的流水记录已由 Rust 后端处理，这里仅做轻量级统计
+        historyManager.incrementTradeCount(p.getUniqueId().toString(), item.getConfigKey(), amt);
+        historyManager.saveAsync();
     }
 
-    private static int countPlayerItems(Player player, MarketItem item, KyochigoPlugin plugin) {
-        ItemStack icon = plugin.getMarketManager().getItemIcon(item);
-        int count = 0;
-        for (ItemStack invItem : player.getInventory().getStorageContents()) {
-            if (invItem != null && invItem.isSimilar(icon)) count += invItem.getAmount();
-        }
-        return count;
-    }
-
-    private static int getInventoryFreeSpace(Player player, ItemStack itemTemplate) {
-        int freeSpace = 0;
-        int maxStack = itemTemplate.getMaxStackSize();
-        for (ItemStack slot : player.getInventory().getStorageContents()) {
-            if (slot == null || slot.getType().isAir()) freeSpace += maxStack;
-            else if (slot.isSimilar(itemTemplate)) freeSpace += Math.max(0, maxStack - slot.getAmount());
-        }
-        return freeSpace;
-    }
+    private void sendMsg(Player p, String msg) { p.sendMessage(PREFIX + msg); }
 }
