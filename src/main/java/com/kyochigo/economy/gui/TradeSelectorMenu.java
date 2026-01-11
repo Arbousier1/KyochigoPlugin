@@ -6,6 +6,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer; // FIXED: Added missing import
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -27,25 +28,16 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
-/**
- * 现代化分页选货菜单 (v9.0 最终版)
- * 整合了精美视觉、翻页系统与严密的防取防拖拽安全逻辑
- */
 public class TradeSelectorMenu implements Listener {
 
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private static final NamespacedKey MENU_KEY = new NamespacedKey("kyochigo", "trade_menu");
-    private static final NamespacedKey PAGE_KEY = new NamespacedKey("kyochigo", "menu_page");
     
-    // 分页配置
-    private static final int ITEMS_PER_PAGE = 45; // 5行物品 + 1行导航
+    private static final int ITEMS_PER_PAGE = 45; 
     private static final Map<UUID, String> playerCurrentCategory = new ConcurrentHashMap<>();
     private static final Map<UUID, Integer> playerCurrentPage = new ConcurrentHashMap<>();
 
-    // 缓存静态视觉组件
     private static final ItemStack BORDER_PANE = createBorderPane();
-
-    // --- 核心入口 ---
 
     public static void openItemSelect(Player player, String categoryId) {
         openItemSelect(player, categoryId, 0);
@@ -55,7 +47,6 @@ public class TradeSelectorMenu implements Listener {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
         String categoryName = getCategoryNameRaw(plugin, categoryId).replaceAll("<[^>]*>", "");
         
-        // 记录状态供刷新使用
         playerCurrentCategory.put(player.getUniqueId(), categoryId);
         playerCurrentPage.put(player.getUniqueId(), page);
 
@@ -66,21 +57,17 @@ public class TradeSelectorMenu implements Listener {
         int totalPages = (int) Math.ceil((double) items.size() / ITEMS_PER_PAGE);
         if (totalPages == 0) totalPages = 1;
 
-        // 创建大箱子 (54格)
         Component title = MM.deserialize("<gradient:#40E0D0:#008080>商业柜台 » " + categoryName + "</gradient> <gray>(" + (page + 1) + "/" + totalPages + ")");
         Inventory inv = Bukkit.createInventory(null, 54, title);
 
-        // 1. 填充动态边框 (最后一行)
         for (int i = 45; i < 54; i++) inv.setItem(i, BORDER_PANE);
 
-        // 2. 放置翻页/功能按钮
         inv.setItem(48, createNavButton(Material.ARROW, "<aqua>上一页", "prev", page > 0));
         inv.setItem(49, createNavButton(Material.NETHER_STAR, "<yellow>刷新行情", "refresh", true));
         inv.setItem(50, createNavButton(Material.ARROW, "<aqua>下一页", "next", page < totalPages - 1));
         inv.setItem(45, createNavButton(Material.IRON_DOOR, "<red>返回主柜台", "back", true));
         inv.setItem(53, createNavButton(Material.BARRIER, "<gray>关闭菜单", "close", true));
 
-        // 3. 填充当前页物品
         int startIdx = page * ITEMS_PER_PAGE;
         int endIdx = Math.min(startIdx + ITEMS_PER_PAGE, items.size());
         
@@ -92,16 +79,12 @@ public class TradeSelectorMenu implements Listener {
         player.openInventory(inv);
     }
 
-    // --- 安全防护逻辑 ---
-
     @EventHandler
     public void onInventoryClick(InventoryClickEvent event) {
         if (!(event.getWhoClicked() instanceof Player player)) return;
-        
-        // 通过标题的前缀模糊匹配或检查 Holder
         if (!isKyochigoMenu(event.getView().title())) return;
 
-        event.setCancelled(true); // 核心防护：禁止点击取出
+        event.setCancelled(true); 
 
         ItemStack clicked = event.getCurrentItem();
         if (clicked == null || !clicked.hasItemMeta()) return;
@@ -115,7 +98,7 @@ public class TradeSelectorMenu implements Listener {
     @EventHandler
     public void onInventoryDrag(InventoryDragEvent event) {
         if (isKyochigoMenu(event.getView().title())) {
-            event.setCancelled(true); // 核心防护：禁止拖拽物品
+            event.setCancelled(true); 
         }
     }
 
@@ -149,8 +132,6 @@ public class TradeSelectorMenu implements Listener {
         }
     }
 
-    // --- 视觉构建辅助 ---
-
     private static ItemStack buildMarketItemStack(MarketItem item, KyochigoPlugin plugin) {
         ItemStack stack = plugin.getMarketManager().getItemIcon(item);
         ItemMeta meta = stack.getItemMeta();
@@ -168,11 +149,10 @@ public class TradeSelectorMenu implements Listener {
 
         meta.lore(lore);
         
-        // 增加精美发光效果 (可选)
-        meta.addEnchant(Enchantment.DURABILITY, 1, true);
+        // FIXED: Changed DURABILITY to UNBREAKING for modern Paper API
+        meta.addEnchant(Enchantment.UNBREAKING, 1, true);
         meta.addItemFlags(ItemFlag.HIDE_ENCHANTS, ItemFlag.HIDE_ATTRIBUTES);
         
-        // 增加星星装饰到名字
         Component originalName = meta.hasDisplayName() ? meta.displayName() : Component.text(item.getPlainDisplayName());
         meta.displayName(Component.text().append(Component.text("✨ ", NamedTextColor.AQUA)).append(originalName).build());
 
@@ -189,7 +169,6 @@ public class TradeSelectorMenu implements Listener {
         meta.displayName(MM.deserialize(name).decoration(TextDecoration.ITALIC, false).decorate(TextDecoration.BOLD));
         meta.getPersistentDataContainer().set(MENU_KEY, PersistentDataType.STRING, action);
         
-        // 装饰性 Lore
         meta.lore(Collections.singletonList(MM.deserialize("<gray>点击执行此导航操作</gray>")));
         stack.setItemMeta(meta);
         return stack;
@@ -204,6 +183,7 @@ public class TradeSelectorMenu implements Listener {
     }
 
     private boolean isKyochigoMenu(Component title) {
+        // FIXED: PlainTextComponentSerializer is now imported correctly
         String plainTitle = PlainTextComponentSerializer.plainText().serialize(title);
         return plainTitle.contains("商业柜台");
     }
