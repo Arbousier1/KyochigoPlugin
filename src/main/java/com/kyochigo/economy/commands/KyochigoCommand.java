@@ -1,51 +1,72 @@
 package com.kyochigo.economy.commands;
 
 import com.kyochigo.economy.KyochigoPlugin;
-import com.kyochigo.economy.gui.MarketDialog;
 import com.kyochigo.economy.managers.InventoryManager;
 import com.kyochigo.economy.managers.MarketManager;
 import com.kyochigo.economy.managers.TransactionManager;
 import com.kyochigo.economy.model.MarketItem;
 import com.kyochigo.economy.utils.CraftEngineHook;
+import de.oliver.fancynpcs.api.FancyNpcsPlugin;
+import de.oliver.fancynpcs.api.Npc;
+import de.oliver.fancynpcs.api.NpcData;
+import de.oliver.fancynpcs.api.actions.ActionTrigger;
+import de.oliver.fancynpcs.api.actions.NpcAction;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
-import org.bukkit.Material;
+import org.bukkit.Location;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
-import org.bukkit.inventory.ItemStack;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
+/**
+ * 插件主指令处理器 (v3.2 精简版)
+ * 职责：处理指令交互，物理召唤并自动绑定交易 Action。
+ */
 public class KyochigoCommand implements CommandExecutor, TabCompleter {
     private final KyochigoPlugin plugin;
     private final MarketManager marketManager;
-    private final TransactionManager transactionManager;
     private final InventoryManager inventoryManager;
-    private final CraftEngineHook hook;
+
+    private static final MiniMessage MM = MiniMessage.miniMessage();
+
+    private static final List<String> CATEGORIES = Arrays.asList(
+            "ores", "food", "crops", "animal_husbandry", "weapons", "misc"
+    );
 
     public KyochigoCommand(KyochigoPlugin plugin,
                            MarketManager marketManager,
-                           TransactionManager transactionManager,
+                           TransactionManager transactionManager, // 保留参数以兼容主类初始化，但不存为变量
                            InventoryManager inventoryManager,
                            CraftEngineHook hook) {
         this.plugin = plugin;
         this.marketManager = marketManager;
-        this.transactionManager = transactionManager;
         this.inventoryManager = inventoryManager;
-        this.hook = hook;
     }
 
     @Override
     public boolean onCommand(@NotNull CommandSender sender, @NotNull Command cmd, @NotNull String label, @NotNull String[] args) {
+        if (args.length > 0 && args[0].equalsIgnoreCase("reload")) {
+            if (sender.hasPermission("kyochigo.admin")) {
+                plugin.reloadPlugin();
+                sender.sendMessage(MM.deserialize("<dark_gray>[</dark_gray><aqua>Kyochigo</aqua><dark_gray>]</dark_gray> <green>配置已重载，后端协议握手成功。</green>"));
+            } else {
+                sender.sendMessage(MM.deserialize("<red>错误：权限不足。</red>"));
+            }
+            return true;
+        }
+
         if (!(sender instanceof Player p)) {
-            sender.sendMessage("§c该命令只能由玩家执行。");
+            sender.sendMessage("§c控制台无法执行此操作。");
             return true;
         }
 
@@ -55,151 +76,137 @@ public class KyochigoCommand implements CommandExecutor, TabCompleter {
         }
 
         String subCommand = args[0].toLowerCase();
-
         switch (subCommand) {
             case "market" -> handleMarket(p);
-            case "reload" -> handleReload(p);
-            case "sellall" -> handleSellAll(p, args);
-            case "clear" -> handleClear(p, args);
-            case "execute_sell" -> handleExecuteSell(p, args);
+            case "spawn" -> handleSpawn(p, args);
+            case "clear" -> handleClear(p, label, args);
             default -> sendHelp(p);
         }
 
         return true;
     }
 
-    // --- 子命令处理逻辑 ---
+    private void handleSpawn(Player p, String[] args) {
+        if (!p.hasPermission("kyochigo.admin")) {
+            p.sendMessage(MM.deserialize("<red>权限不足。</red>"));
+            return;
+        }
+
+        if (args.length < 2) {
+            p.sendMessage(MM.deserialize("<red>用法: /" + labelOrPluginName() + " spawn <分类></red>"));
+            return;
+        }
+
+        String category = args[1].toLowerCase();
+        if (!CATEGORIES.contains(category)) {
+            p.sendMessage(MM.deserialize("<red>无效分类。可选: " + CATEGORIES + "</red>"));
+            return;
+        }
+
+        // 定义 NPC 视觉属性
+        String displayName = switch (category) {
+            case "ores" -> "<gradient:#00FFFF:#0080FF><b>矿产资源专员</b></gradient>";
+            case "food" -> "<gradient:#FFA500:#FF4500><b>烹饪物资商贩</b></gradient>";
+            case "crops" -> "<gradient:#55FF55:#FFD700><b>农耕作物农夫</b></gradient>";
+            case "animal_husbandry" -> "<gradient:#FFB6C1:#FF69B4><b>畜牧产品专员</b></gradient>";
+            case "weapons" -> "<gradient:#FF3333:#8B0000><b>神兵利器铁匠</b></gradient>";
+            default -> "<gradient:#E0E0E0:#808080><b>综合杂项收购</b></gradient>";
+        };
+
+        String skinName = switch (category) {
+            case "ores" -> "MHF_Golem";
+            case "food" -> "MHF_Cake";
+            case "crops" -> "MHF_Villager";
+            case "animal_husbandry" -> "MHF_Cow";
+            case "weapons" -> "MHF_Enderman";
+            default -> "MHF_Chest";
+        };
+
+        Location loc = p.getLocation();
+        String npcId = "kyochigo_" + category + "_" + UUID.randomUUID().toString().substring(0, 5);
+
+        // 1. 构建 NpcData
+        NpcData data = new NpcData(npcId, p.getUniqueId(), loc);
+        data.setDisplayName(displayName);
+        data.setSkin(skinName);
+        data.setTurnToPlayer(true);
+
+        // 2. 注入 Action 协议 (修复 Order 参数)
+        NpcAction myAction = FancyNpcsPlugin.get().getActionManager().getActionByName("kyochigo_trade");
+        if (myAction != null) {
+            NpcAction.NpcActionData actionData = new NpcAction.NpcActionData(1, myAction, category);
+            List<NpcAction.NpcActionData> actions = data.getActions(ActionTrigger.RIGHT_CLICK);
+            actions.add(actionData);
+            data.setActions(ActionTrigger.RIGHT_CLICK, actions);
+        }
+
+        // 3. 激活 NPC
+        Npc npc = FancyNpcsPlugin.get().getNpcAdapter().apply(data);
+        FancyNpcsPlugin.get().getNpcManager().registerNpc(npc);
+        npc.create();
+        npc.spawnForAll();
+
+        p.sendMessage(MM.deserialize("<dark_gray>[</dark_gray><aqua>Kyochigo</aqua><dark_gray>]</dark_gray> <green>已召唤 </green>" + displayName + " <gray>(协议已绑定)</gray>"));
+    }
 
     private void handleMarket(Player p) {
-        List<MarketItem> items = marketManager.getAllItems();
-        if (items == null || items.isEmpty()) {
-            p.sendMessage("§c当前市场没有可显示的物品。");
+        if (marketManager.getAllItems().isEmpty()) {
+            p.sendMessage(MM.deserialize("<red>错误：市场行情中心尚未准备就绪。</red>"));
             return;
         }
-        MarketDialog.open(p, items, hook);
+        boolean viewOnly = !p.hasPermission("kyochigo.admin");
+        marketManager.fetchMarketPricesAndOpenGui(p, viewOnly);
     }
 
-    private void handleReload(Player p) {
-        if (!p.hasPermission("kyochigo.admin")) {
-            p.sendMessage("§c你没有权限执行此操作。");
-            return;
-        }
-        plugin.reloadConfig();
-        marketManager.loadItems();
-        p.sendMessage("§a§l[Kyochigo] §7配置与物品列表已重载！");
-    }
+    private void handleClear(Player p, String label, String[] args) {
+        if (!p.hasPermission("kyochigo.admin") || args.length < 4) return;
+        Player target = Bukkit.getPlayer(args[1]);
+        MarketItem item = marketManager.findMarketItemByKey(args[2]);
+        int amount = tryParseInt(args[3]);
 
-    private void handleSellAll(Player p, String[] args) {
-        MarketItem targetItem = null;
-        if (args.length > 1) {
-            targetItem = marketManager.findMarketItemByKey(args[1]);
-        } else {
-            ItemStack hand = p.getInventory().getItemInMainHand();
-            if (hand.getType() != Material.AIR) {
-                targetItem = marketManager.findMarketItem(hand);
+        if (target != null && item != null && amount > 0) {
+            if (inventoryManager.removeItems(target, item, amount)) {
+                p.sendMessage(MM.deserialize("<green>操作成功：已强制清退目标资产。</green>"));
             }
-        }
-
-        if (targetItem == null) {
-            p.sendMessage("§c该物品不在回收列表中或你需要手持物品。");
-            return;
-        }
-        if (!targetItem.isAllowSell()) {
-            p.sendMessage("§c此物品禁止出售。");
-            return;
-        }
-
-        int totalAmount = inventoryManager.countItems(p, targetItem);
-        if (totalAmount <= 0) {
-            p.sendMessage("§c背包中没有 " + targetItem.getDisplayName());
-            return;
-        }
-
-        p.sendMessage("§e正在获取实时报价...");
-        transactionManager.openSellConfirmDialog(p, targetItem, totalAmount, 0, 0);
-    }
-
-    private void handleClear(Player p, String[] args) {
-        if (!p.hasPermission("kyochigo.admin")) {
-            p.sendMessage("§c无权限。");
-            return;
-        }
-        if (args.length < 4) {
-            p.sendMessage("§c用法: /kyochigo clear <玩家> <物品Key> <数量>");
-            return;
-        }
-
-        Player target = Bukkit.getPlayer(args[1]);
-        MarketItem item = marketManager.findMarketItemByKey(args[2]);
-        int amount = tryParseInt(args[3]);
-
-        if (target == null || item == null || amount <= 0) {
-            p.sendMessage("§c参数无效或玩家不在线。");
-            return;
-        }
-
-        if (inventoryManager.removeItemSafe(target, item, amount)) {
-            p.sendMessage("§a已清理。");
-        } else {
-            p.sendMessage("§c清理失败，物品不足。");
-        }
-    }
-
-    private void handleExecuteSell(Player p, String[] args) {
-        if (args.length < 4) return;
-        Player target = Bukkit.getPlayer(args[1]);
-        MarketItem item = marketManager.findMarketItemByKey(args[2]);
-        int amount = tryParseInt(args[3]);
-
-        if (target != null && item != null) {
-            transactionManager.executeTransaction(target, item, amount);
         }
     }
 
     private void sendHelp(Player p) {
-        p.sendMessage("§8§m      §e§l Kyochigo Economy §8§m      ");
-        p.sendMessage("§7/kyochigo market §8- §f打开市场面板");
-        p.sendMessage("§7/kyochigo sellall [Key] §8- §f出售背包所有指定物品");
+        p.sendMessage(MM.deserialize("<dark_gray>──────────</dark_gray> <aqua><b>Kyochigo Economy</b></aqua> <dark_gray>──────────</dark_gray>"));
+        p.sendMessage(MM.deserialize("<gray>/market</gray> <dark_gray>─</dark_gray> <white>访问行情看板</white>"));
         if (p.hasPermission("kyochigo.admin")) {
-            p.sendMessage("§7/kyochigo reload §8- §f重载插件");
-            p.sendMessage("§7/kyochigo clear <玩家> <Key> <数量> §8- §f管理清理");
+            p.sendMessage(MM.deserialize("<gray>/" + labelOrPluginName() + " spawn <分类></gray> <dark_gray>─</dark_gray> <white>召唤贸易专员</white>"));
+            p.sendMessage(MM.deserialize("<gray>/" + labelOrPluginName() + " reload</gray> <dark_gray>─</dark_gray> <white>强制同步数据</white>"));
         }
-        p.sendMessage("§8§m                              ");
+        p.sendMessage(MM.deserialize("<dark_gray>───────────────────────────────────</dark_gray>"));
     }
 
     private int tryParseInt(String val) {
         try { return Integer.parseInt(val); } catch (Exception e) { return -1; }
     }
 
-    // --- Tab 完成逻辑 ---
+    private String labelOrPluginName() {
+        return plugin.getName().toLowerCase();
+    }
 
     @Override
     public @Nullable List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command cmd, @NotNull String alias, @NotNull String[] args) {
         if (args.length == 1) {
-            List<String> subCommands = new ArrayList<>(Arrays.asList("market", "sellall"));
+            List<String> subs = new ArrayList<>(List.of("market"));
             if (sender.hasPermission("kyochigo.admin")) {
-                subCommands.addAll(Arrays.asList("reload", "clear", "execute_sell"));
+                subs.addAll(Arrays.asList("spawn", "reload", "clear"));
             }
-            return filter(subCommands, args[0]);
+            return filter(subs, args[0]);
         }
-
-        if (args.length == 2) {
-            if (args[0].equalsIgnoreCase("sellall") || args[0].equalsIgnoreCase("clear") || args[0].equalsIgnoreCase("execute_sell")) {
-                if (args[0].equalsIgnoreCase("sellall")) {
-                    return filter(marketManager.getAllItems().stream().map(MarketItem::getConfigKey).collect(Collectors.toList()), args[1]);
-                }
-                return null; // 返回 null 默认显示在线玩家列表
-            }
+        if (args.length == 2 && args[0].equalsIgnoreCase("spawn") && sender.hasPermission("kyochigo.admin")) {
+            return filter(CATEGORIES, args[1]);
         }
-
-        if (args.length == 3 && (args[0].equalsIgnoreCase("clear") || args[0].equalsIgnoreCase("execute_sell"))) {
-            return filter(marketManager.getAllItems().stream().map(MarketItem::getConfigKey).collect(Collectors.toList()), args[2]);
-        }
-
         return new ArrayList<>();
     }
 
     private List<String> filter(List<String> list, String input) {
-        return list.stream().filter(s -> s.toLowerCase().startsWith(input.toLowerCase())).collect(Collectors.toList());
+        return list.stream()
+                .filter(s -> s.toLowerCase().startsWith(input.toLowerCase()))
+                .collect(Collectors.toList());
     }
 }

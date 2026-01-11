@@ -1,108 +1,120 @@
 # ==========================================
-# KyochigoEconomy 核心配置
+# KyochigoEconomy 核心配置 (v2.0 联动版)
 # ==========================================
 
-# 货币符号 (用于聊天栏消息显示)
-currency: "<gold>$</gold>"
+# 货币符号 (支持 MiniMessage 颜色代码与渐变)
+display:
+  currency-symbol: "<gold>⛁</gold>"
+
+# 系统基础设置
+settings:
+  # 交易频率限制 (毫秒)，防止恶意刷取 API
+  rate-limit-ms: 500
+  # 调试模式：开启后控制台会显示 Rust 后端的详细计算 Payload
+  debug: false
+  # 允许使用市场功能的世界
+  enabled-worlds:
+    - world
+    - world_nether
+    - world_the_end
+
+# ==========================================
+# 后端连接设置 (用于对接 Rust 核心)
+# ==========================================
+backend:
+  # Rust 后端 API 地址
+  url: "http://127.0.0.1:9981"
+  connect-timeout: 3
+  request-timeout: 10
 
 # ==========================================
 # 类别定义 (Categories)
 # ==========================================
-# 这里的 key (如 ores, food) 仅用于 items 里的 category 字段进行逻辑归类。
 categories:
   ores:
-    name: "<gradient:blue:cyan>稀有矿产</gradient>"
+    name: "<gradient:#00FFFF:#0080FF><b>矿产资源</b></gradient>"
   food:
-    name: "<gradient:green:yellow>农业与食物</gradient>"
+    name: "<gradient:#FFA500:#FF4500><b>烹饪美食</b></gradient>"
+  crops:
+    name: "<gradient:#55FF55:#FFD700><b>农耕作物</b></gradient>"
+  animal_husbandry:
+    name: "<gradient:#FFB6C1:#FF69B4><b>畜牧产品</b></gradient>"
   weapons:
-    name: "<gradient:red:dark_red>神兵利器</gradient>"
+    name: "<gradient:#FF3333:#8B0000><b>神兵利器</b></gradient>"
   misc:
-    name: "<gray>杂项</gray>"
+    name: "<gradient:#E0E0E0:#808080><b>综合杂项</b></gradient>"
 
 # ==========================================
 # 物品定义 (Items)
 # ==========================================
-# 修改后请使用 /plugman reload KyochigoEconomy 或重启服务器
+# 注意：不再提供 name 字段。
+# MATERIAL 类型将使用 Material.translationKey()。
+# CRAFTENGINE 类型将通过其提供的 API 获取名称。
 items:
 
-  # --- 示例 1: 原版物品 (标准配置) ---
+  # --- 矿产资源 ---
   diamond:
-    # 物品类型: MATERIAL (原版) 或 CRAFT_ENGINE (自定义)
     type: MATERIAL
-    # 物品 ID: Minecraft 原版材质名 (必须大写)
     id: DIAMOND
-    # (可选) 自定义列表显示的名称，不填则自动显示为 "Diamond"
-    # name: "&b稀有钻石"
-    # (可选) 自定义列表显示的图标，不填则默认使用 id 对应的材质
-    # icon: DIAMOND
+    category: ores
+    base_price: 500.0
+    lambda: 0.005      # 中等波动
+    daily_limit: 64    # 每人每天限售一组
+    allow_buy: true
+    allow_sell: true
+
+  gold_ingot:
+    type: MATERIAL
+    id: GOLD_INGOT
     category: ores
     base_price: 100.0
-    lambda: 0.01
+    lambda: 0.001
+    daily_limit: 0     # 无限制
     allow_buy: true
     allow_sell: true
 
-  # --- 示例 2: 原版物品 (自定义名称) ---
-  golden_carrot:
+  # --- 烹饪与食材 ---
+  golden_apple:
     type: MATERIAL
-    id: GOLDEN_CARROT
-    # 【新特性】自定义显示名称
-    name: "&6金胡萝卜"
+    id: GOLDEN_APPLE
     category: food
-    base_price: 15.0
-    lambda: 0.005
+    base_price: 1200.0
+    lambda: 0.01       # 波动较快
+    daily_limit: 16
     allow_buy: true
     allow_sell: true
 
-  # --- 示例 3: CraftEngine 自定义物品 (关键配置) ---
-  mythic_sword:
-    type: CRAFTENGINE
-    # 物品 ID: 对应 CraftEngine 里的 Item ID
-    id: "mythic:flame_sword"
-    # 【新特性】自定义名称
-    name: "&c[神话] 烈焰之剑"
-    # 【新特性】自定义图标 (重要！)
-    # 因为 "mythic:flame_sword" 不是有效的材质名，
-    # 必须指定一个原版材质(如 DIAMOND_SWORD)让菜单显示，否则会显示为箱子(CHEST)。
-    icon: DIAMOND_SWORD
-    category: weapons
-    base_price: 5000.0
-    lambda: 0.05
-    allow_buy: true
-    allow_sell: false
-
-  # --- 示例 4: 另一个原版物品 ---
-  iron_ingot:
+  # --- 农耕作物 ---
+  wheat:
     type: MATERIAL
-    id: IRON_INGOT
-    category: ores
-    base_price: 10.0
-    lambda: 0.02
+    id: WHEAT
+    category: crops
+    base_price: 5.0
+    lambda: 0.0001     # 极低波动，非常稳定
+    daily_limit: 0
     allow_buy: true
     allow_sell: true
 
-    
-    
-# ==========================================
-# GUI 界面设置 (Market GUI Settings)
-# ==========================================
-gui:
-  market_list:
-    title: "&8今日市场行情"
-    external_title: "市场报价表"
-    
-    header:
-      decoration: "<yellow>============== 实时价格 =============="
-      # 这里的宽度不用太在意，代码里已经根据对齐算法处理了
-      width: 260
+  # --- CraftEngine 自定义物品示例 ---
+  # 假设这是你用 CraftEngine 制作的一把名为“火之呼吸”的剑
+  flame_sword:
+    type: CRAFTENGINE
+    id: "mythic:flame_sword" # 内部 ID
+    icon: DIAMOND_SWORD      # GUI 中显示的材质
+    category: weapons
+    base_price: 25000.0
+    lambda: 0.1              # 价格随全服拥有量极速崩盘
+    daily_limit: 1
+    allow_buy: false         # 禁止直接购买，只能从玩家手中回收
+    allow_sell: true
 
-    item:
-      # 当物品禁止交易时显示的文字
-      no_price_text: "$-"
-      
-      # 尺寸设置
-      width: 260
-      height: 24
-
-    close_button:
-      text: "&c[关闭]"
-      width: 100
+  # --- 杂项方块 ---
+  cobblestone:
+    type: MATERIAL
+    id: COBBLESTONE
+    category: misc
+    base_price: 0.1
+    lambda: 0.00001          # 几乎不动的固定价
+    daily_limit: 0
+    allow_buy: true
+    allow_sell: true

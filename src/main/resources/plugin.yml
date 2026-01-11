@@ -1,39 +1,68 @@
 name: KyochigoEconomy
-version: 2.0-SNAPSHOT
+version: 2.0.0
 main: com.kyochigo.economy.KyochigoPlugin
-api-version: 1.21
+api-version: '1.21'
 author: Kyochigo
-description: Rust backed economy system with zMenu integration
+description: "基于 Rust 高性能后端与 Paper Dialog API 的动态经济系统 (集成 FancyNpcs 贸易员系统)"
+website: https://github.com/kyochigo/economy
 
-# 【重要】列出你的依赖插件，即使找不到也不会报错
-softdepend: [Vault, zMenu, CraftEngine, PlaceholderAPI]
+# 【核心依赖】
+# 插件启动必须依赖项
+depend: 
+  - Vault
+  - FancyNpcs
+
+# 【软依赖】
+# 存在则挂钩，不存在亦可运行
+softdepend: 
+  - CraftEngine
+  - PlaceholderAPI
 
 commands:
+  kyochigo:
+    description: "KyochigoEconomy 主指令 (包含管理、重载与 NPC 部署)"
+    usage: "/kyochigo [market|spawn|reload|clear]"
+    permission: kyochigo.user
+    aliases: [ke, kye, eco, economy]
+    
   market:
-    description: 打开市场列表
-    usage: /market [reload]
+    description: "打开全球行情中心看板 (仅供查看价格)"
+    usage: "/market"
     permission: kyochigo.market
+    aliases: [shop, bazaar]
     
   sellall:
-    description: 出售背包物品
-    usage: /sellall [物品ID]
+    description: "管理员快速出售指令 (玩家建议通过 NPC 交互交易)"
+    usage: "/sellall [Key]"
     permission: kyochigo.sellall
-
-  kyochigo:
-    description: 插件内部指令
-    usage: /kyochigo
-    permission: kyochigo.console
+    aliases: [sa]
 
 permissions:
+  # 基础权限：所有玩家默认拥有
+  kyochigo.user:
+    description: "允许使用 Kyochigo 主指令查看基本信息"
+    default: true
+    children:
+      kyochigo.market: true
+
   kyochigo.market:
-    description: 允许打开市场
+    description: "允许随时随地查看实时价格看板"
     default: true
+
+  # 交易权限：建议仅分配给管理员或通过 NPC 交互逻辑控制
   kyochigo.sellall:
-    description: 允许使用出售指令
-    default: true
-  kyochigo.admin:
-    description: 管理员权限
+    description: "允许使用 /sellall 快速出售指令"
     default: op
-  kyochigo.console:
-    description: 内部执行权限
-    default: true
+
+  kyochigo.buy:
+    description: "允许使用指令直接购买物品"
+    default: op
+
+  # 管理权限：OP 默认拥有
+  kyochigo.admin:
+    description: "最高管理权限：包含 NPC 召唤、配置重载、强制清理物品"
+    default: op
+    children:
+      kyochigo.user: true
+      kyochigo.sellall: true
+      kyochigo.buy: true

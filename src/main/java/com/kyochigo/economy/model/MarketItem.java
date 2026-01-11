@@ -1,12 +1,39 @@
 package com.kyochigo.economy.model;
 
+import com.google.gson.JsonObject;
 import com.kyochigo.economy.utils.CraftEngineHook;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
+import java.util.Arrays;
+import java.util.Optional;
+
+/**
+ * 市场物品模型 (v3.3 补全版)
+ * 修复了 getTempNeff 方法未定义的编译错误。
+ */
 public class MarketItem {
+
+    private static final double PRICE_THRESHOLD = 0.001;
+    private static final double DEFAULT_BUY_MULTIPLIER = 1.25;
+
+    public enum ItemType {
+        MATERIAL, CRAFTENGINE;
+        public static ItemType from(String type) {
+            return Arrays.stream(values())
+                    .filter(t -> t.name().equalsIgnoreCase(type))
+                    .findFirst().orElse(MATERIAL);
+        }
+    }
+
     private final String configKey;
-    private final String type;
+    private final ItemType itemType;
     private final String id;
     private final String customName;
     private final String iconMaterial;
@@ -15,144 +42,142 @@ public class MarketItem {
     private final double lambda;
     private final boolean allowBuy;
     private final boolean allowSell;
+    private int n;
 
-    public MarketItem(String key, String type, String id, String category, double basePrice, double lambda, boolean allowBuy, boolean allowSell) {
-        this(key, type, id, null, null, category, basePrice, lambda, allowBuy, allowSell);
+    private double tempNeff = 0.0;
+    private double tempPrice = 0.0;
+    private double tempBuyPrice = 0.0;
+
+    private MarketItem(Builder builder) {
+        this.configKey = builder.key;
+        this.itemType = ItemType.from(builder.type);
+        this.id = builder.id;
+        this.customName = builder.customName;
+        this.iconMaterial = builder.iconMaterial;
+        this.category = builder.category;
+        this.basePrice = builder.basePrice;
+        this.lambda = builder.lambda;
+        this.allowBuy = builder.allowBuy;
+        this.allowSell = builder.allowSell;
+        this.n = builder.initialN;
     }
 
-    public MarketItem(String key, String type, String id, String customName, String iconMaterial,
-                      String category, double basePrice, double lambda, boolean allowBuy, boolean allowSell) {
-        this.configKey = key;
-        this.type = type;
-        this.id = id;
-        this.customName = customName;
-        this.iconMaterial = iconMaterial;
-        this.category = category;
-        this.basePrice = basePrice;
-        this.lambda = lambda;
-        this.allowBuy = allowBuy;
-        this.allowSell = allowSell;
-    }
+    // =========================================================================
+    // 逻辑匹配与视觉渲染
+    // =========================================================================
 
-    /**
-     * 获取用于展示的图标
-     * @param hook CraftEngine 钩子，用于获取自定义物品
-     * @return ItemStack
-     */
-    public ItemStack getIcon(CraftEngineHook hook) {
-        // 1. 尝试获取 CraftEngine 物品
-        if ("CRAFTENGINE".equalsIgnoreCase(type)) {
-            if (hook != null) {
-                ItemStack ceItem = hook.getItem(id);
-                if (ceItem != null) return ceItem.clone();
-            }
-        }
-
-        // 2. 尝试获取 iconMaterial 指定的材质
-        if (this.iconMaterial != null && !this.iconMaterial.isEmpty()) {
-            Material mat = Material.matchMaterial(this.iconMaterial);
-            if (mat != null) return new ItemStack(mat);
-        }
-
-        // 3. 尝试将 ID 解析为材质 (针对 MATERIAL 类型)
-        Material mat = Material.matchMaterial(id);
-        if (mat != null) return new ItemStack(mat);
-
-        // 4. 只有万不得已才返回 Barrier，并建议在控制台检查配置
-        return new ItemStack(Material.BARRIER);
-    }
-
-    /**
-     * 兼容性方法：直接获取 Material 类型
-     * 用于某些只接受 Material 的 API (防止报错)
-     */
-    public Material getMaterial() {
-        Material mat = null;
-        if (this.iconMaterial != null && !this.iconMaterial.isEmpty()) {
-            mat = Material.matchMaterial(this.iconMaterial);
-        }
-        if (mat == null) {
-            mat = Material.matchMaterial(this.id);
-        }
-        return mat != null ? mat : Material.BARRIER;
-    }
-
-    public boolean matches(ItemStack item, CraftEngineHook hook) {
+    public boolean matches(@Nullable ItemStack item, @Nullable CraftEngineHook hook) {
         if (item == null || item.getType().isAir()) return false;
-
-        if ("CRAFTENGINE".equalsIgnoreCase(type)) {
-            if (hook == null) return false;
-            return hook.isCraftEngineItem(item, id);
-        }
-
-        if ("MATERIAL".equalsIgnoreCase(type)) {
-            // 增强的材质匹配，忽略大小写
-            String typeName = item.getType().name();
-            String keyName = null;
-            try {
-                if (item.getType().getKey() != null) {
-                    keyName = item.getType().getKey().getKey();
-                }
-            } catch (Exception ignored) {}
-
-            return typeName.equalsIgnoreCase(id) || (keyName != null && keyName.equalsIgnoreCase(id));
-        }
-
-        return false;
+        return switch (itemType) {
+            case CRAFTENGINE -> hook != null && hook.isCraftEngineItem(item, id);
+            case MATERIAL -> item.getType().name().equalsIgnoreCase(id);
+        };
     }
 
-    public String getDisplayName() {
-        if (this.customName != null && !this.customName.isEmpty()) {
-            return this.customName.replace("&", "§");
-        }
-        return getDisplayNameOrLangKey();
+    public Component getDisplayNameComponent(@Nullable CraftEngineHook hook) {
+        return Optional.ofNullable(customName)
+                .filter(name -> !name.isEmpty())
+                .map(this::parseName)
+                .or(() -> getCEDisplayName(hook))
+                .or(this::getMaterialDisplayName)
+                .orElse(Component.text(id));
     }
 
-    public String getDisplayNameOrLangKey() {
-        if (this.customName != null && !this.customName.isEmpty()) {
-            return this.customName.replace("&", "§");
-        }
-        
-        if ("CRAFTENGINE".equalsIgnoreCase(type)) return id;
-
-        Material mat = Material.matchMaterial(id);
-        if (mat != null) {
-            try {
-                // 返回翻译键值，配合 Paper 的 Component.translatable 使用效果更佳
-                return "<lang:" + mat.getTranslationKey() + ">";
-            } catch (NoSuchMethodError e) {
-                return mat.name();
-            }
-        }
-        return "Unknown Item";
+    private Component parseName(String name) {
+        return (name.contains("&") || name.contains("§"))
+                ? LegacyComponentSerializer.legacyAmpersand().deserialize(name)
+                : MiniMessage.miniMessage().deserialize(name);
     }
 
-    // --- Getters ---
+    private Optional<Component> getCEDisplayName(CraftEngineHook hook) {
+        if (itemType != ItemType.CRAFTENGINE || hook == null) return Optional.empty();
+        return Optional.ofNullable(hook.getItem(id))
+                .filter(ItemStack::hasItemMeta)
+                .map(item -> item.getItemMeta().displayName())
+                .or(() -> Optional.of(Component.text(id)));
+    }
+
+    private Optional<Component> getMaterialDisplayName() {
+        return Optional.ofNullable(Material.matchMaterial(id))
+                .map(mat -> Component.translatable(mat.translationKey()));
+    }
+
+    public String getPlainDisplayName() {
+        return PlainTextComponentSerializer.plainText().serialize(getDisplayNameComponent(null));
+    }
+
+    @NotNull
+    public ItemStack getIcon(@Nullable CraftEngineHook hook) {
+        return Optional.ofNullable(itemType == ItemType.CRAFTENGINE ? hook : null)
+                .map(h -> h.getItem(id))
+                .or(() -> {
+                    String matName = (iconMaterial != null && !iconMaterial.isEmpty()) ? iconMaterial : id;
+                    return Optional.ofNullable(Material.matchMaterial(matName)).map(ItemStack::new);
+                })
+                .map(ItemStack::clone)
+                .orElse(new ItemStack(Material.BARRIER));
+    }
+
+    public JsonObject toJsonObject() {
+        JsonObject json = new JsonObject();
+        json.addProperty("id", configKey);
+        json.addProperty("name", getPlainDisplayName());
+        json.addProperty("basePrice", basePrice);
+        json.addProperty("lambda", lambda);
+        json.addProperty("n", (double) n);
+        json.addProperty("iota", 0.0);
+        return json;
+    }
+
+    // =========================================================================
+    // 核心修复区域：Standard Getters
+    // =========================================================================
 
     public String getConfigKey() { return configKey; }
+    public ItemType getItemType() { return itemType; }
     public String getId() { return id; }
-    public String getType() { return type; }
-    
-    public String getMaterialName() { 
-        if (iconMaterial != null && !iconMaterial.isEmpty()) return iconMaterial.toUpperCase();
-        if (id != null) return id.toUpperCase();
-        return "STONE";
-    }
-
+    public String getCategory() { return category; }
     public double getBasePrice() { return basePrice; }
     public double getLambda() { return lambda; }
     public boolean isAllowBuy() { return allowBuy; }
     public boolean isAllowSell() { return allowSell; }
-
-    // --- 兼容性 Getters (解决 Dialog 报错) ---
+    public int getN() { return n; }
     
-    public double getBuyPrice() {
-        return basePrice;
+    // 行情数据 Getter [修复重点]
+    public double getTempNeff() { return tempNeff; }
+    public double getRawTempPrice() { return tempPrice; }
+    public double getRawTempBuyPrice() { return tempBuyPrice; }
+
+    public double getSellPrice() { return (tempPrice > PRICE_THRESHOLD) ? tempPrice : basePrice; }
+    public double getBuyPrice() { return (tempBuyPrice > PRICE_THRESHOLD) ? tempBuyPrice : basePrice * DEFAULT_BUY_MULTIPLIER; }
+
+    // Setters
+    public void setN(int n) { this.n = n; }
+    public void setTempPrice(double p) { this.tempPrice = p; }
+    public void setTempBuyPrice(double p) { this.tempBuyPrice = p; }
+    public void setTempNeff(double n) { this.tempNeff = n; }
+
+    public Material getMaterial() { 
+        return Optional.ofNullable(Material.matchMaterial(id)).orElse(Material.BARRIER); 
     }
 
-    public double getSellPrice() {
-        // 如果你需要买卖差价，可以在这里修改逻辑
-        // 例如：return basePrice * 0.5;
-        return basePrice; 
+    // Builder
+    public static class Builder {
+        private String key, type = "MATERIAL", id, customName, iconMaterial, category = "misc";
+        private double basePrice, lambda;
+        private boolean allowBuy = true, allowSell = true;
+        private int initialN = 0;
+        public Builder key(String v) { this.key = v; return this; }
+        public Builder type(String v) { this.type = v; return this; }
+        public Builder id(String v) { this.id = v; return this; }
+        public Builder customName(String v) { this.customName = v; return this; }
+        public Builder iconMaterial(String v) { this.iconMaterial = v; return this; }
+        public Builder category(String v) { this.category = v; return this; }
+        public Builder basePrice(double v) { this.basePrice = v; return this; }
+        public Builder lambda(double v) { this.lambda = v; return this; }
+        public Builder allowBuy(boolean v) { this.allowBuy = v; return this; }
+        public Builder allowSell(boolean v) { this.allowSell = v; return this; }
+        public Builder initialN(int v) { this.initialN = v; return this; }
+        public MarketItem build() { return new MarketItem(this); }
     }
 }

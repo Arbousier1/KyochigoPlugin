@@ -1,87 +1,97 @@
 package com.kyochigo.economy.utils;
 
+import net.momirealms.craftengine.bukkit.item.BukkitItemManager;
+import net.momirealms.craftengine.core.item.ItemManager;
+import net.momirealms.craftengine.core.util.Key;
 import org.bukkit.Bukkit;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.plugin.RegisteredServiceProvider;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
-// [Fix 1] 优先导入 CraftEngine 的核心类
-import net.momirealms.craftengine.core.plugin.CraftEngine;
-import net.momirealms.craftengine.core.item.ItemManager;
-import net.momirealms.craftengine.core.util.Key; // 导入 CraftEngine Key
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Optional;
+import java.util.logging.Level;
 
-import java.lang.reflect.Method;
-
+/**
+ * CraftEngine 深度挂钩工具 (v4.0 极致性能版)
+ * 优化：使用 computeIfAbsent 简化缓存、LRU 自动内存回收、强化 1.20.5+ 组件识别。
+ */
 public class CraftEngineHook {
 
-    @SuppressWarnings("rawtypes")
-    private ItemManager itemManager;
-    private boolean enabled = false;
+    private static final String PLUGIN_NAME = "CraftEngine";
+    private static final String LOG_PREFIX = "[KyochigoEconomy] ";
+    private static final int MAX_CACHE_SIZE = 100;
+
+    private final ItemManager<ItemStack> itemManager;
+    private final boolean enabled;
+
+    // LRU 缓存：自动清理最久未使用的模板
+    private final Map<String, ItemStack> itemCache = new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, ItemStack> eldest) {
+            return size() > MAX_CACHE_SIZE;
+        }
+    };
 
     public CraftEngineHook() {
-        if (Bukkit.getPluginManager().getPlugin("CraftEngine") == null) {
-            return;
-        }
-
-        try {
-            RegisteredServiceProvider<CraftEngine> provider = Bukkit.getServicesManager().getRegistration(CraftEngine.class);
-            if (provider != null) {
-                CraftEngine api = provider.getProvider();
-                this.itemManager = api.itemManager();
-                this.enabled = true;
-                Bukkit.getLogger().info("[KyochigoEconomy] Hooked into CraftEngine successfully!");
+        // 使用 isPluginEnabled 确保插件不仅存在且已加载完毕
+        if (Bukkit.getPluginManager().isPluginEnabled(PLUGIN_NAME)) {
+            ItemManager<ItemStack> manager = null;
+            try {
+                manager = BukkitItemManager.instance();
+                Bukkit.getLogger().info(LOG_PREFIX + "成功连接 CraftEngine (Bukkit 强类型管理器)");
+            } catch (Throwable t) {
+                Bukkit.getLogger().log(Level.WARNING, LOG_PREFIX + "获取 CraftEngine 实例时发生错误", t);
             }
-        } catch (Exception e) {
-            Bukkit.getLogger().warning("[KyochigoEconomy] Error hooking CraftEngine: " + e.getMessage());
+            this.itemManager = manager;
+            this.enabled = (manager != null);
+        } else {
+            this.itemManager = null;
+            this.enabled = false;
         }
     }
 
-    @SuppressWarnings("unchecked")
-    public ItemStack getItem(String id) {
-        if (!enabled || itemManager == null) return null;
+    /**
+     * 获取自定义物品实例
+     * 使用 computeIfAbsent 实现线程安全（在 Bukkit 主线程下）的单次构建逻辑
+     */
+    @Nullable
+    public ItemStack getItem(@Nullable String id) {
+        if (!enabled || id == null) return null;
 
-        try {
-            // 1. 创建 Adventure Key (使用全限定名，避免导入冲突)
-            net.kyori.adventure.key.Key adventureKey = net.kyori.adventure.key.Key.key(id);
-
-            // 2. [关键修复] 直接创建 CraftEngine Key，绕过 KeyUtils
-            // 既然 Key 是一个 Record，我们可以直接构造它，这比依赖 KeyUtils 更稳定
-            // Key(String namespace, String key)
-            Key internalKey = new Key(adventureKey.namespace(), adventureKey.value());
-            
-            // 3. 调用 createWrappedItem
-            // 显式转型 null 为 Player 接口
-            Object result = itemManager.createWrappedItem(
-                internalKey, 
-                (net.momirealms.craftengine.core.entity.player.Player) null 
-            );
-
-            if (result == null) return null;
-
-            // 4. 提取 Bukkit ItemStack
-            if (result instanceof ItemStack) {
-                return (ItemStack) result;
+        // 利用 computeIfAbsent 简化 "检查-构建-存入" 的三步操作
+        ItemStack template = itemCache.computeIfAbsent(id, keyStr -> {
+            try {
+                return itemManager.buildItemStack(Key.of(keyStr), null);
+            } catch (Exception e) {
+                Bukkit.getLogger().log(Level.WARNING, LOG_PREFIX + "无法构建物品 [" + keyStr + "]", e);
+                return null;
             }
+        });
 
-            // 反射调用 getItemStack()
-            Method getItemStackMethod = result.getClass().getMethod("getItemStack");
-            Object itemStackObj = getItemStackMethod.invoke(result);
-
-            if (itemStackObj instanceof ItemStack) {
-                return (ItemStack) itemStackObj;
-            }
-
-        } catch (Exception e) {
-            // 忽略错误
-        }
-        return null;
+        return template != null ? template.clone() : null;
     }
 
-    public boolean isCraftEngineItem(ItemStack handItem, String targetId) {
-        if (!enabled || handItem == null) return false;
+    /**
+     * 识别物品指纹 (1.20.5+ 推荐方式)
+     */
+    public boolean isCraftEngineItem(@Nullable ItemStack item, @Nullable String targetId) {
+        if (!enabled || item == null || item.getType().isAir() || targetId == null) {
+            return false;
+        }
 
-        ItemStack template = getItem(targetId);
-        if (template == null) return false;
+        return itemManager.wrap(item)
+                .customId()
+                .map(key -> key.toString().equalsIgnoreCase(targetId))
+                .orElse(false);
+    }
 
-        return template.isSimilar(handItem);
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public void clearCache() {
+        itemCache.clear();
     }
 }

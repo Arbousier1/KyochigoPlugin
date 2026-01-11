@@ -13,6 +13,9 @@ import org.jetbrains.annotations.Nullable;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * KyochigoEconomy PAPI 扩展 (v2.1 增强版)
+ */
 public class KyochigoExpansion extends PlaceholderExpansion {
     
     private final KyochigoPlugin plugin;
@@ -21,7 +24,7 @@ public class KyochigoExpansion extends PlaceholderExpansion {
     private final Map<UUID, TradeData> tradeCache;
 
     public KyochigoExpansion(KyochigoPlugin plugin, InventoryManager inventoryManager, MarketManager marketManager, Map<UUID, TradeData> tradeCache) {
-        this.plugin = plugin;
+        this.plugin = plugin; // 建议直接由主类传入
         this.inventoryManager = inventoryManager;
         this.marketManager = marketManager;
         this.tradeCache = tradeCache;
@@ -29,10 +32,13 @@ public class KyochigoExpansion extends PlaceholderExpansion {
 
     @Override
     public @NotNull String getIdentifier() { return "kyochigo"; }
+    
     @Override
-    public @NotNull String getAuthor() { return "System"; }
+    public @NotNull String getAuthor() { return "Kyochigo"; }
+    
     @Override
-    public @NotNull String getVersion() { return "1.6"; } // 更新版本号
+    public @NotNull String getVersion() { return "2.1.0"; } 
+    
     @Override
     public boolean persist() { return true; }
 
@@ -40,39 +46,79 @@ public class KyochigoExpansion extends PlaceholderExpansion {
     public @Nullable String onPlaceholderRequest(Player player, @NotNull String params) {
         if (player == null) return "";
 
-        // 1. 判断玩家是否有足够物品出售: %kyochigo_can_sell_<Key>_<数量>%
-        if (params.startsWith("can_sell_")) {
-            String strip = params.substring(9); // 提升性能，避免 replace
-            int lastUnderscore = strip.lastIndexOf('_');
-            if (lastUnderscore != -1) {
-                try {
-                    String itemKey = strip.substring(0, lastUnderscore);
-                    int amountNeeded = Integer.parseInt(strip.substring(lastUnderscore + 1));
-                    
-                    MarketItem item = marketManager.findMarketItemByKey(itemKey);
-                    if (item != null) {
-                        // 使用优化后的 hasEnoughItems (高性能提前退出逻辑)
-                        return inventoryManager.hasEnoughItems(player, item, amountNeeded) ? "true" : "false";
-                    }
-                } catch (NumberFormatException ignored) {}
-            }
-            return "false";
+        // --- [1. 物品基础属性] ---
+
+        // %kyochigo_balance_<Key>% : 玩家持有量
+        if (params.startsWith("balance_")) {
+            MarketItem item = marketManager.findMarketItemByKey(params.substring(8));
+            return item != null ? String.valueOf(inventoryManager.countItems(player, item)) : "0";
         }
 
-        // 2. 获取当前交易缓存数据
+        // %kyochigo_item_name_<Key>% : 物品配置的展示名 (不带颜色代码的纯文本)
+        if (params.startsWith("item_name_")) {
+            MarketItem item = marketManager.findMarketItemByKey(params.substring(10));
+            return item != null ? item.getPlainDisplayName() : "未知物品";
+        }
+
+        // --- [2. 价格与市场动态] ---
+
+        // %kyochigo_price_sell_<Key>%
+        if (params.startsWith("price_sell_")) {
+            MarketItem item = marketManager.findMarketItemByKey(params.substring(11));
+            return item != null ? String.format("%.2f", item.getSellPrice()) : "0.00";
+        }
+
+        // %kyochigo_price_buy_<Key>%
+        if (params.startsWith("price_buy_")) {
+            MarketItem item = marketManager.findMarketItemByKey(params.substring(10));
+            return item != null ? String.format("%.2f", item.getBuyPrice()) : "0.00";
+        }
+
+        // %kyochigo_trend_<Key>% : 涨跌趋势符号
+        if (params.startsWith("trend_")) {
+            MarketItem item = marketManager.findMarketItemByKey(params.substring(6));
+            if (item == null) return "";
+            double current = item.getSellPrice();
+            double base = item.getBasePrice();
+            if (current > base) return "§a↑";
+            if (current < base) return "§c↓";
+            return "§7-";
+        }
+
+        // --- [3. 个人限额统计] ---
+
+        // %kyochigo_daily_remaining_<Key>%
+        if (params.startsWith("daily_remaining_")) {
+            String itemKey = params.substring(16);
+            int limit = plugin.getConfiguration().getItemDailyLimit(itemKey);
+            if (limit <= 0) return "∞";
+            int traded = plugin.getHistoryManager().getDailyTradeCount(player.getUniqueId().toString(), itemKey);
+            return String.valueOf(Math.max(0, limit - traded));
+        }
+
+        // --- [4. 全局状态与分类] ---
+
+        // %kyochigo_item_category_<Key>% : 获取物品所属分类的本地化名称
+        if (params.startsWith("item_category_")) {
+            MarketItem item = marketManager.findMarketItemByKey(params.substring(14));
+            if (item == null) return "未知";
+            return plugin.getConfiguration().getRaw().getString("categories." + item.getCategory() + ".name", item.getCategory());
+        }
+
+        // %kyochigo_env_note%
+        if (params.equalsIgnoreCase("env_note")) {
+            return marketManager.getLastEnvNote();
+        }
+
+        // --- [5. 交易会话缓存] ---
         TradeData data = tradeCache.get(player.getUniqueId());
         if (data != null) {
             switch (params.toLowerCase()) {
-                case "config_key": return data.configKey;
-                case "item_name": return data.displayName;
-                case "material": return data.material;
-                case "amount": return String.valueOf(data.amount);
-                case "unit_price": return String.format("%.2f", data.unitPrice);
-                case "total_price": return String.format("%.2f", data.totalPrice);
-                case "env_index": return String.format("%.2f", data.envIndex); // 新增环境指数变量
+                case "session_total": return String.format("%.2f", data.totalPrice);
+                case "session_type": return data.isBuy ? "购买" : "出售";
             }
         }
 
-        return null; // 如果没有匹配的变量，返回 null 让 PAPI 处理
+        return null; 
     }
 }

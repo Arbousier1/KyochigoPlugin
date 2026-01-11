@@ -1,16 +1,17 @@
 package com.kyochigo.economy.gui;
 
-import com.kyochigo.economy.managers.TransactionManager;
+import com.kyochigo.economy.KyochigoPlugin;
 import com.kyochigo.economy.model.MarketItem;
 import io.papermc.paper.dialog.Dialog;
 import io.papermc.paper.registry.data.dialog.ActionButton;
 import io.papermc.paper.registry.data.dialog.DialogBase;
+import io.papermc.paper.registry.data.dialog.DialogRegistryEntry;
 import io.papermc.paper.registry.data.dialog.body.DialogBody;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
 import io.papermc.paper.registry.data.dialog.action.DialogAction;
 import io.papermc.paper.registry.data.dialog.action.DialogActionCallback;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.JoinConfiguration;
+import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.event.ClickCallback;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
@@ -18,72 +19,102 @@ import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
-import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 交易确认对话框 (v3.0 逻辑对齐版)
+ */
 public class TransactionDialog {
 
-    /**
-     * 打开出售确认对话框
-     */
-    public static void openConfirm(Player player, MarketItem item, int amount, double totalPrice, double unitPrice, TransactionManager manager) {
-        // 1. 获取图标
-        ItemStack icon = item.getIcon(null);
+    private static final ClickCallback.Options DEFAULT_OPTIONS = ClickCallback.Options.builder().build();
+    private static final MiniMessage MM = MiniMessage.miniMessage();
 
-        // 2. 解析名称 (处理 MiniMessage)
-        Component nameComponent = MiniMessage.miniMessage().deserialize(item.getDisplayName())
-                .color(NamedTextColor.WHITE).decorate(TextDecoration.BOLD);
+    private static final String SELL_TITLE = "<gold><b>交易确认</b></gold>";
+    private static final String BUY_TITLE = "<aqua><b>申购确认</b></aqua>";
+    private static final String DIVIDER = "<dark_gray>────────────────────────────────</dark_gray>";
+    private static final String CURRENCY = " ⛁";
 
-        // 3. 构建主体文本内容
-        List<Component> messages = new ArrayList<>();
-        messages.add(Component.text("正在出售: ", NamedTextColor.GRAY).append(nameComponent));
-        messages.add(Component.empty());
-        messages.add(Component.text("数量: ", NamedTextColor.GRAY)
-                .append(Component.text(amount, NamedTextColor.GOLD)));
-        messages.add(Component.text("单价: ", NamedTextColor.GRAY)
-                .append(Component.text(String.format("★%.2f", unitPrice), NamedTextColor.AQUA)));
-        messages.add(Component.empty());
-        messages.add(Component.text("预计总收益: ", NamedTextColor.GRAY)
-                .append(Component.text(String.format("★%.2f", totalPrice), NamedTextColor.GREEN, TextDecoration.BOLD)));
+    private static final Component CONFIRM_SELL = MM.deserialize("<green>[ 确认出售 ]</green>");
+    private static final Component CONFIRM_BUY = MM.deserialize("<green>[ 支付并获取 ]</green>");
+    private static final Component CANCEL = MM.deserialize("<gray>[ 取消 ]</gray>");
+    private static final Component INSUFFICIENT_FUNDS = MM.deserialize("<gray>资金不足</gray>");
+    private static final Component INSUFFICIENT_WARNING = MM.deserialize("<red><b>余额不足，请调整申购数量。</b></red>");
 
-        Component fullBodyText = Component.join(JoinConfiguration.newlines(), messages);
+    public static void openSellConfirm(Player player, MarketItem item, int amount, double pricePerUnit) {
+        KyochigoPlugin plugin = KyochigoPlugin.getInstance();
+        double totalGains = amount * pricePerUnit;
 
-        // 4. 定义按钮动作回调
-        DialogActionCallback confirmCallback = (view, audience) -> {
+        Component content = buildSellContent(item, amount, pricePerUnit, totalGains, plugin);
+        DialogActionCallback callback = (view, audience) -> {
             if (audience instanceof Player p) {
-                manager.executeTransaction(p, item, amount);
+                plugin.getTransactionManager().executeSell(p, item, amount, pricePerUnit);
             }
         };
 
-        DialogActionCallback cancelCallback = (view, audience) -> {
+        showConfirmationDialog(player, item, content, SELL_TITLE, CONFIRM_SELL, callback, plugin);
+    }
+
+    public static void openBuyConfirm(Player player, MarketItem item, int amount, double pricePerUnit) {
+        KyochigoPlugin plugin = KyochigoPlugin.getInstance();
+        double totalCost = amount * pricePerUnit;
+        double balance = plugin.getEconomy().getBalance(player);
+        boolean canAfford = balance >= totalCost;
+
+        Component content = buildBuyContent(item, amount, pricePerUnit, totalCost, balance, canAfford, plugin);
+        DialogActionCallback callback = (view, audience) -> {
             if (audience instanceof Player p) {
-                p.sendMessage(Component.text("已取消交易。", NamedTextColor.RED));
+                plugin.getTransactionManager().executeBuy(p, item, amount, pricePerUnit);
             }
         };
 
-        // 5. 构建 Dialog 实例
-        Dialog dialog = Dialog.create(factory -> factory.empty()
-                .base(DialogBase.builder(Component.text("交易确认", NamedTextColor.YELLOW, TextDecoration.BOLD))
-                        .canCloseWithEscape(true)
-                        .body(List.of(
-                                DialogBody.item(icon).build(),
-                                DialogBody.plainMessage(fullBodyText)
-                        ))
-                        .build()
-                )
-                .type(DialogType.confirmation(
-                        ActionButton.builder(Component.text("✔ 确认出售", NamedTextColor.GREEN))
-                                .tooltip(Component.text("点击锁定价格并出售"))
-                                .action(DialogAction.customClick(confirmCallback, ClickCallback.Options.builder().uses(1).lifetime(Duration.ofMinutes(2)).build()))
-                                .build(),
-                        ActionButton.builder(Component.text("✘ 取消", NamedTextColor.RED))
-                                .tooltip(Component.text("放弃交易"))
-                                .action(DialogAction.customClick(cancelCallback, ClickCallback.Options.builder().uses(1).build()))
-                                .build()
-                ))
-        );
+        Component confirmButton = canAfford ? CONFIRM_BUY : INSUFFICIENT_FUNDS;
+        showConfirmationDialog(player, item, content, BUY_TITLE, confirmButton, canAfford ? callback : null, plugin);
+    }
 
-        player.showDialog(dialog);
+    private static Component buildSellContent(MarketItem item, int amount, double pricePerUnit, double totalGains, KyochigoPlugin plugin) {
+        return Component.text()
+                .append(MM.deserialize("<gray>确认出售以下物品：</gray>")).append(Component.newline())
+                .append(item.getDisplayNameComponent(plugin.getMarketManager().getCraftEngineHook()).decorate(TextDecoration.BOLD))
+                .append(Component.text(" x" + amount, NamedTextColor.WHITE)).append(Component.newline())
+                .append(MM.deserialize(DIVIDER)).append(Component.newline())
+                .append(MM.deserialize("<gray>实时报价：</gray><white>" + String.format("%.2f", pricePerUnit) + CURRENCY + "</white>")).append(Component.newline())
+                .append(MM.deserialize("<gray>预计获得：</gray><green>+" + String.format("%.2f", totalGains) + CURRENCY + "</green>"))
+                .build();
+    }
+
+    private static Component buildBuyContent(MarketItem item, int amount, double pricePerUnit, double totalCost, double balance, boolean canAfford, KyochigoPlugin plugin) {
+        TextComponent.Builder builder = Component.text()
+                .append(MM.deserialize("<gray>确认申购以下物品：</gray>")).append(Component.newline())
+                .append(item.getDisplayNameComponent(plugin.getMarketManager().getCraftEngineHook()).decorate(TextDecoration.BOLD))
+                .append(Component.text(" x" + amount, NamedTextColor.WHITE)).append(Component.newline())
+                .append(MM.deserialize(DIVIDER)).append(Component.newline())
+                .append(MM.deserialize("<gray>所需支出：</gray><red>-" + String.format("%.2f", totalCost) + CURRENCY + "</red>")).append(Component.newline())
+                .append(MM.deserialize("<gray>当前余额：</gray><white>" + String.format("%.2f", balance) + CURRENCY + "</white>"));
+
+        if (!canAfford) {
+            builder.append(Component.newline()).append(INSUFFICIENT_WARNING);
+        }
+
+        return builder.build();
+    }
+
+    private static void showConfirmationDialog(Player player, MarketItem item, Component content, String title,
+                                               Component confirmButton, DialogActionCallback callback,
+                                               KyochigoPlugin plugin) {
+        player.showDialog(Dialog.create(factory -> {
+            DialogRegistryEntry.Builder registryBuilder = factory.empty();
+            ItemStack icon = plugin.getMarketManager().getItemIcon(item);
+            
+            registryBuilder.base(DialogBase.builder(MM.deserialize(title))
+                    .body(List.of(
+                            DialogBody.item(icon).description(DialogBody.plainMessage(content)).build()
+                    )).build());
+
+            ActionButton confirmAction = ActionButton.builder(confirmButton)
+                    .action(callback != null ? DialogAction.customClick(callback, DEFAULT_OPTIONS) : null).build();
+            ActionButton cancelAction = ActionButton.builder(CANCEL).build();
+
+            registryBuilder.type(DialogType.confirmation(confirmAction, cancelAction));
+        }));
     }
 }

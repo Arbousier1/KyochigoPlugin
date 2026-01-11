@@ -1,132 +1,230 @@
 package com.kyochigo.economy.managers;
 
-import com.google.gson.JsonObject;
 import com.kyochigo.economy.KyochigoPlugin;
 import com.kyochigo.economy.TradeData;
-import com.kyochigo.economy.gui.TransactionDialog; // 导入新 GUI 类
+import com.kyochigo.economy.gui.TransactionDialog;
 import com.kyochigo.economy.model.MarketItem;
-import net.kyori.adventure.text.Component;
+import com.kyochigo.economy.utils.CraftEngineHook;
 import net.milkbowl.vault.economy.Economy;
-import org.bukkit.Bukkit;
+import org.bukkit.Sound;
 import org.bukkit.entity.Player;
 
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * 交易执行管理器 (v3.2 最终修正版)
+ * <p>
+ * 职责：
+ * 1. 协调 GUI、后端、Vault 和背包系统。
+ * 2. [核心] 实施“汇率锁定”机制，确保玩家看到的预览价格与最终成交价格严格一致（无滑点）。
+ */
 public class TransactionManager {
+
+    // --- 消息常量 ---
+    private static final String PREFIX = "§8[§bKyochigo§8] ";
+    private static final String ERR_EXPIRED = "§c交易会话已过期，请重新打开菜单。";
+    private static final String ERR_BACKEND = "§c计算失败：后端未响应。";
+    private static final String ERR_LOCK_FAIL = "§c§l致命错误：§f汇率锁定失败，交易拦截！";
+    private static final String MSG_LOCKING = "§7正在与核心同步交易数据...";
+
     private final KyochigoPlugin plugin;
     private final InventoryManager inventoryManager;
     private final BackendManager backendManager;
+    private final HistoryManager historyManager;
     private final Economy economy;
     private final Map<UUID, TradeData> tradeCache;
 
-    public TransactionManager(KyochigoPlugin plugin, InventoryManager inventoryManager, BackendManager backendManager, Economy economy, Map<UUID, TradeData> tradeCache) {
+    public TransactionManager(KyochigoPlugin plugin, InventoryManager inv, BackendManager backend, Economy eco, Map<UUID, TradeData> cache) {
         this.plugin = plugin;
-        this.inventoryManager = inventoryManager;
-        this.backendManager = backendManager;
-        this.economy = economy;
-        this.tradeCache = tradeCache;
+        this.inventoryManager = inv;
+        this.backendManager = backend;
+        this.economy = eco;
+        this.tradeCache = cache;
+        this.historyManager = plugin.getHistoryManager();
     }
 
-    public void setTradeCache(UUID uuid, String key, String name, String mat, int amt, double unit, double total, double env) {
-        tradeCache.put(uuid, new TradeData(key, name, mat, amt, unit, total, env));
+    // =========================================================================
+    // 1. 弹窗与预检 (UI Entry - Preview Phase)
+    // =========================================================================
+
+    public void openBuyConfirmDialog(Player p, MarketItem i, int amt) { requestPriceAndOpen(p, i, amt, "buy"); }
+    public void openSellConfirmDialog(Player p, MarketItem i, int amt) { requestPriceAndOpen(p, i, amt, "sell"); }
+
+    private void requestPriceAndOpen(Player player, MarketItem item, int amount, String action) {
+        // [预览阶段] manualEnvIndex = null
+        // 含义：请求后端使用服务器当前的实时环境指数进行报价
+        // isPreview = true (不记录流水)
+        backendManager.sendCalculateRequest(player, action, item.getConfigKey(), (double) amount,
+                item.getBasePrice(), item.getLambda(), null, true, response -> {
+                    
+                    if (response == null || !response.has("totalPrice")) {
+                        sendMsg(player, ERR_BACKEND);
+                        return;
+                    }
+
+                    double unitPrice = response.get("unitPriceAvg").getAsDouble();
+                    
+                    // [关键] 记录后端此刻返回的 envIndex
+                    // 这个值将被写入快照，作为本次会话的“锁定汇率”
+                    double currentEnv = response.get("envIndex").getAsDouble();
+
+                    TradeData data = new TradeData(item.getConfigKey(), item.getPlainDisplayName(), 
+                        item.getMaterial().name(), amount, unitPrice, 
+                        response.get("totalPrice").getAsDouble(), 
+                        currentEnv, action.equals("buy"));
+
+                    tradeCache.put(player.getUniqueId(), data);
+
+                    // 打开 GUI 供玩家确认
+                    if (data.isBuy) TransactionDialog.openBuyConfirm(player, item, amount, unitPrice);
+                    else TransactionDialog.openSellConfirm(player, item, amount, unitPrice);
+                });
     }
 
-    /**
-     * 业务逻辑：执行最终的交易扣除和发钱
-     */
-    public void executeTransaction(Player p, MarketItem item, int amountNeeded) {
-        UUID uuid = p.getUniqueId();
-        TradeData data = tradeCache.get(uuid);
+    // =========================================================================
+    // 2. 核心执行流 (Execution Phase - Commit)
+    // =========================================================================
 
-        if (data == null || !data.configKey.equals(item.getConfigKey()) || data.amount != amountNeeded) {
-            p.sendMessage(Component.text("§c交易数据已失效或已过期，请重新打开窗口。"));
+    public void executeBuy(Player p, MarketItem i, int a, double pr) { executeTransaction(p, i, a); }
+    public void executeSell(Player p, MarketItem i, int a, double pr) { executeTransaction(p, i, a); }
+
+    public void executeTransaction(Player player, MarketItem item, int amount) {
+        UUID uuid = player.getUniqueId();
+        TradeData snapshot = tradeCache.get(uuid);
+
+        // 1. 会话检查
+        if (snapshot == null) {
+            sendMsg(player, ERR_EXPIRED);
             return;
         }
 
-        if (!inventoryManager.hasEnoughItems(p, item, amountNeeded)) {
-            p.sendMessage(Component.text("§c背包内物品不足，交易取消。"));
-            return;
-        }
+        // 2. 动态限额调整 (可能因玩家在犹豫期内其他交易导致额度变动)
+        int finalAmount = calculateAdjustedAmount(player, item, amount);
+        if (finalAmount <= 0) return;
 
-        String historyKey = backendManager.getHistoryKey(uuid.toString(), item.getConfigKey());
-        double startN = backendManager.getHistoryConfig().getDouble(historyKey, 0.0);
+        // 3. 资产物理准入预检 (背包空间/物品数量)
+        if (!isAssetCheckPassed(player, item, finalAmount, snapshot.isBuy)) return;
 
-        JsonObject req = new JsonObject();
-        req.addProperty("base_price", item.getBasePrice());
-        req.addProperty("start_n", startN);
-        req.addProperty("amount", (double) amountNeeded);
-        req.addProperty("decay_lambda", item.getLambda());
-        req.addProperty("is_preview", false);
-        req.addProperty("manual_env_index", data.envIndex);
-
-        backendManager.sendCalculateRequest(req, json -> {
-            if (json == null) {
-                p.sendMessage(Component.text("§c交易失败，服务器拒绝。"));
-                return;
-            }
-
-            try {
-                double backendTotalPrice = json.get("total_price").getAsDouble();
-                if (Math.abs(backendTotalPrice - data.totalPrice) > 0.01) {
-                    p.sendMessage(Component.text("§c价格发生意外变动，交易终止。"));
+        // 4. 后端最终共识锁定 (Double Check)
+        sendMsg(player, MSG_LOCKING);
+        
+        // [核心修复] 传递 snapshot.envIndex 作为 manualEnvIndex
+        // 含义：强制 Rust 后端使用快照生成时的环境指数进行最终计价
+        // isPreview = false (正式交易，记录流水并持久化)
+        backendManager.sendCalculateRequest(player, snapshot.isBuy ? "buy" : "sell", item.getConfigKey(), 
+            (double) finalAmount, item.getBasePrice(), item.getLambda(), snapshot.envIndex, false, response -> {
+                
+                if (response == null || !response.has("totalPrice")) {
+                    sendMsg(player, ERR_LOCK_FAIL);
+                    tradeCache.remove(uuid); // 发生严重错误，销毁会话
                     return;
                 }
-
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (inventoryManager.removeItemSafe(p, item, amountNeeded)) {
-                        backendManager.getHistoryConfig().set(historyKey, startN + amountNeeded);
-                        backendManager.saveHistory();
-
-                        if (economy != null) {
-                            economy.depositPlayer(p, backendTotalPrice);
-                        }
-                        
-                        tradeCache.remove(uuid);
-                        p.sendMessage(Component.text(String.format("§a✔ 出售成功！获得: §e$%.2f", backendTotalPrice)));
-                        p.closeDialog(); 
-                    } else {
-                        p.sendMessage(Component.text("§c扣除物品失败 (可能物品已被移动)。"));
-                        p.closeDialog();
-                    }
-                });
-            } catch (Exception e) {
-                p.sendMessage(Component.text("§c交易数据异常。"));
-            }
-        });
-    }
-
-    /**
-     * 预处理：获取后端实时价格，然后调用 GUI 打开对话框
-     */
-    public void openSellConfirmDialog(Player player, MarketItem item, int amount, double totalPrice, double unitPrice) {
-        String historyKey = backendManager.getHistoryKey(player.getUniqueId().toString(), item.getConfigKey());
-        double startN = backendManager.getHistoryConfig().getDouble(historyKey, 0.0);
-
-        JsonObject req = new JsonObject();
-        req.addProperty("base_price", item.getBasePrice());
-        req.addProperty("start_n", startN);
-        req.addProperty("amount", (double) amount);
-        req.addProperty("decay_lambda", item.getLambda());
-        req.addProperty("is_preview", true); 
-
-        backendManager.sendCalculateRequest(req, json -> {
-            if (json == null) {
-                player.sendMessage(Component.text("§c交易所连接失败。"));
-                return;
-            }
-
-            double realTotalPrice = json.get("total_price").getAsDouble();
-            double realUnitPrice = json.get("unit_price_avg").getAsDouble();
-            double envIndex = json.get("env_index").getAsDouble();
-
-            Bukkit.getScheduler().runTask(plugin, () -> {
-                // 更新缓存
-                setTradeCache(player.getUniqueId(), item.getConfigKey(), item.getDisplayName(), item.getMaterialName(), amount, realUnitPrice, realTotalPrice, envIndex);
                 
-                // [关键调用] 调用剥离出的 GUI 类打开对话框
-                TransactionDialog.openConfirm(player, item, amount, realTotalPrice, realUnitPrice, this);
+                // 获取最终核算的金额
+                double finalPrice = response.get("totalPrice").getAsDouble();
+                
+                // 进入资产交割环节
+                finalizeAssetSwap(player, item, snapshot, finalAmount, finalPrice);
             });
-        });
     }
+
+    // =========================================================================
+    // 3. 资产交换逻辑 (Asset Swapping)
+    // =========================================================================
+
+    private void finalizeAssetSwap(Player player, MarketItem item, TradeData snapshot, int amount, double price) {
+        // [最后一道防线] 确保扣款前再次验证余额 (防止异步期间把钱转走了)
+        if (snapshot.isBuy && !economy.has(player, price)) {
+            sendMsg(player, "§c余额不足，交易取消。");
+            tradeCache.remove(player.getUniqueId());
+            return;
+        }
+
+        boolean isSuccess = snapshot.isBuy 
+                ? performBuyAction(player, item, amount, price) 
+                : performSellAction(player, item, amount, price);
+
+        if (isSuccess) {
+            handleTransactionSuccess(player, item, amount, price, snapshot.isBuy);
+        }
+        
+        // 交易完成，移除快照
+        tradeCache.remove(player.getUniqueId());
+    }
+
+    private boolean performBuyAction(Player player, MarketItem item, int amount, double price) {
+        // 1. 扣钱
+        economy.withdrawPlayer(player, price);
+        // 2. 给货 (利用 InventoryManager v3.1 的安全发放逻辑)
+        inventoryManager.giveItems(player, item, amount);
+        return true;
+    }
+
+    private boolean performSellAction(Player player, MarketItem item, int amount, double price) {
+        // 1. 扣货 (利用 InventoryManager v3.1 的安全扣除逻辑)
+        if (!inventoryManager.removeItems(player, item, amount)) {
+            sendMsg(player, "§c背包内物品变动，交易取消。");
+            return false;
+        }
+        // 2. 给钱
+        economy.depositPlayer(player, price);
+        return true;
+    }
+
+    // =========================================================================
+    // 4. 辅助校验器 (Validators & Utils)
+    // =========================================================================
+
+    private int calculateAdjustedAmount(Player player, MarketItem item, int amount) {
+        int limit = plugin.getConfiguration().getItemDailyLimit(item.getConfigKey());
+        if (limit <= 0) return amount; // 无限制
+
+        int traded = historyManager.getDailyTradeCount(player.getUniqueId().toString(), item.getConfigKey());
+        
+        if (traded >= limit) {
+            sendMsg(player, "§c§l交易拒绝！§7今日额度已达上限 (§f" + limit + "§7)。");
+            return 0;
+        }
+        
+        if (traded + amount > limit) {
+            int adjusted = limit - traded;
+            sendMsg(player, "§e提示: §7因触发限额，交易数量已自动调整为 §a" + adjusted + " §7个。");
+            return adjusted;
+        }
+        return amount;
+    }
+
+    private boolean isAssetCheckPassed(Player player, MarketItem item, int amount, boolean isBuy) {
+        if (isBuy) {
+            // 检查背包空间 (无副作用检查)
+            if (!inventoryManager.hasSpaceForItem(player, item, amount)) {
+                sendMsg(player, "§c背包空间不足，请整理后再试。");
+                return false;
+            }
+        } else {
+            // 检查物品持有量
+            if (!inventoryManager.hasEnoughItems(player, item, amount)) {
+                sendMsg(player, "§c物品数量不足或不匹配 (请检查NBT/耐久)。");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void handleTransactionSuccess(Player p, MarketItem item, int amt, double price, boolean isBuy) {
+        p.playSound(p.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1f, 1f);
+        
+        String actionText = isBuy ? "§a§l购买成功" : "§a§l出售成功";
+        String moneyText = isBuy ? "§f花费 §e" : "§f获得 §e";
+        
+        sendMsg(p, String.format("%s！ %s%.2f", actionText, moneyText, price));
+        
+        // 记录到本地 SQLite/YML 历史 (用于限额统计)
+        // 注意：详细的流水记录已由 Rust 后端处理，这里仅做轻量级统计
+        historyManager.incrementTradeCount(p.getUniqueId().toString(), item.getConfigKey(), amt);
+        historyManager.saveAsync();
+    }
+
+    private void sendMsg(Player p, String msg) { p.sendMessage(PREFIX + msg); }
 }
