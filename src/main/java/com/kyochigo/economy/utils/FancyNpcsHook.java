@@ -10,6 +10,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
+import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -20,8 +21,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * FancyNpcs 动作挂钩 (v5.5 最终重构版)
- * 职责：连接物理 NPC 与插件贸易系统，支持空手打开箱子菜单或手持物品快捷出售。
+ * FancyNpcs 动作挂钩 (v5.6 同步修复版)
+ * 职责：连接物理 NPC 与插件贸易系统，已修复异步线程打开 GUI 导致的 IllegalStateException。
  */
 public class FancyNpcsHook extends NpcAction {
 
@@ -46,14 +47,17 @@ public class FancyNpcsHook extends NpcAction {
 
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
 
-        // 1. 特殊逻辑：打开全分类看板
-        if (ANALYZER_TRIGGERS.contains(value.toLowerCase())) {
-            plugin.getMarketManager().fetchMarketPricesAndOpenGui(player, true);
-            return;
-        }
+        // 使用调度器切换回主线程执行，防止报错
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            // 1. 特殊逻辑：打开全分类看板
+            if (ANALYZER_TRIGGERS.contains(value.toLowerCase())) {
+                plugin.getMarketManager().fetchMarketPricesAndOpenGui(player, true);
+                return;
+            }
 
-        // 2. 核心逻辑：处理特定柜台交互 (value 为 categoryId)
-        processPhysicalTrade(plugin, player, value);
+            // 2. 核心逻辑：处理特定柜台交互 (value 为 categoryId)
+            processPhysicalTrade(plugin, player, value);
+        });
     }
 
     /**
@@ -86,7 +90,6 @@ public class FancyNpcsHook extends NpcAction {
         }
 
         // 3. 执行快捷出售：先请求计价，计价成功后会自动弹出确认对话框
-        // 这样可以锁定汇率并生成交易快照，防止出现“已过期”报错
         plugin.getTransactionManager().openSellConfirmDialog(player, item, hand.getAmount());
     }
 
