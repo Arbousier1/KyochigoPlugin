@@ -3,6 +3,7 @@ package com.kyochigo.economy;
 import com.google.gson.Gson;
 import com.kyochigo.economy.commands.KyochigoCommand;
 import com.kyochigo.economy.expansions.KyochigoExpansion;
+import com.kyochigo.economy.gui.TradeSelectorMenu;
 import com.kyochigo.economy.managers.*;
 import com.kyochigo.economy.utils.CraftEngineHook;
 import com.kyochigo.economy.utils.FancyNpcsHook;
@@ -16,8 +17,10 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * KyochigoEconomy 主类 (v3.1 修复版)
- * 修复：正确注入 Economy 对象，解决 NPE 问题。
+ * KyochigoEconomy 主类 (v3.5 工业适配版)
+ * 修复内容：
+ * 1. 注册 TradeSelectorMenu 监听器以支持箱子 GUI。
+ * 2. 增强 onDisable 数据刷盘逻辑。
  */
 public class KyochigoPlugin extends JavaPlugin {
 
@@ -40,10 +43,13 @@ public class KyochigoPlugin extends JavaPlugin {
             return;
         }
 
+        // 2. ★ 注册 GUI 事件监听器 (必须注册，否则箱子菜单无法点击)
+        getServer().getPluginManager().registerEvents(new TradeSelectorMenu(), this);
+
         long duration = System.currentTimeMillis() - startTime;
         Bukkit.getConsoleSender().sendMessage("§8[§bKyochigo§8] §f系统核心已就绪 §7(" + duration + "ms)");
         if (getServer().getPluginManager().isPluginEnabled("FancyNpcs")) {
-            Bukkit.getConsoleSender().sendMessage("§8[§bKyochigo§8] §f交互协议: §dFancyNpcs Action v4.0");
+            Bukkit.getConsoleSender().sendMessage("§8[§bKyochigo§8] §f交互协议: §dFancyNpcs Action v5.5 联调成功");
         }
     }
 
@@ -53,7 +59,6 @@ public class KyochigoPlugin extends JavaPlugin {
             if (!components.initialize(this)) return false;
 
             // 2. 初始化第三方集成 (Vault, FancyNpcs 等)
-            // 这里会将获取到的 Economy 注入回 TransactionManager
             if (!integrations.initialize(this, components)) return false;
 
             // 3. 注册命令
@@ -75,9 +80,14 @@ public class KyochigoPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        // ★ 在关闭前强制将内存数据同步至后端，防止汇率计算偏差
+        if (components.marketManager() != null) {
+            components.marketManager().reSyncToBackend();
+        }
+        
         components.cleanup();
         integrations.cleanup();
-        getLogger().info("👋 核心进程已断开，所有数据已安全落盘。");
+        getLogger().info("👋 核心进程已断开，所有数据已安全刷入后端。");
     }
 
     public void reloadPlugin() {
@@ -144,8 +154,7 @@ public class KyochigoPlugin extends JavaPlugin {
             this.marketManager = new MarketManager(plugin, this.craftEngineHook);
             this.marketManager.loadItems();
 
-            // 注意：此时 Economy 尚未加载，传入 null。
-            // 必须确保 PluginIntegrations.initialize 中调用 setEconomy
+            // 初始化交易管理器，初始 Economy 注入 null，后续由 Integrations 补齐
             this.transactionManager = new TransactionManager(plugin, inventoryManager, 
                 backendManager, null, tradeCache);
 
@@ -191,7 +200,7 @@ public class KyochigoPlugin extends JavaPlugin {
                 return false;
             }
 
-            // 2. ★★★ 关键修复：将获取到的经济系统注入 TransactionManager ★★★
+            // 2. 注入获取到的经济系统
             components.transactionManager().setEconomy(economy);
 
             // 3. FancyNpcs 挂钩
