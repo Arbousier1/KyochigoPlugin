@@ -25,10 +25,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 交易确认对话框 (严格对齐 MarketDialog 版)
- * 1. 逻辑标准：显示基准价格，不计算环境加权
- * 2. 术语标准：统一使用 "购买：" 与 "售卖："
- * 3. 视觉标准：等宽字体 + 白色数值 + 金色符号
+ * 交易确认对话框 (严格对齐 MarketDialog 逻辑版)
+ * 职责：处理最终交易确认，单价显示逻辑与行情中心、柜台保持 100% 物理一致。
  */
 public class TransactionDialog {
 
@@ -36,18 +34,18 @@ public class TransactionDialog {
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private static final Key FONT_UNIFORM = Key.key("minecraft:uniform");
 
-    // UI 文案统一
+    // UI 文案标准
     private static final String ACTION_TITLE = "<gradient:#40E0D0:#008080><b>商业交易中心</b></gradient>";
     private static final String ENTRY_TITLE = "<gradient:#FFD700:#FFA500><b>Kyochigo 交易所</b></gradient>";
-    private static final String BUY_TITLE = "<gradient:#55FF55:#00AA00><b>确认购买</b></gradient>";
-    private static final String SELL_TITLE = "<gradient:#FFCC33:#E67E22><b>确认售卖</b></gradient>";
+    private static final String BUY_TITLE = "<gradient:#55FF55:#00AA00><b>确认购买申请</b></gradient>";
+    private static final String SELL_TITLE = "<gradient:#FFCC33:#E67E22><b>确认售卖申请</b></gradient>";
     private static final String DIVIDER = "<dark_gray>──────────────────────────────</dark_gray>";
     private static final String CURRENCY = " <gold>⛁</gold>";
 
-    // 静态按钮对齐
+    // 静态按钮
     private static final Component CONFIRM_SELL = MM.deserialize("<bold><gradient:#FFCC33:#E67E22> [ 确认售卖 ] </gradient></bold>");
     private static final Component CONFIRM_BUY = MM.deserialize("<bold><gradient:#55FF55:#00AA00> [ 确认购买 ] </gradient></bold>");
-    private static final Component CANCEL = MM.deserialize("<gray> [ 放弃本次交易 ] </gray>");
+    private static final Component CANCEL = MM.deserialize("<gray> [ 放弃交易 ] </gray>");
     private static final Component INSUFFICIENT_FUNDS = MM.deserialize("<red> [ 账户余额不足 ] </red>");
 
     // ========================================================================
@@ -57,6 +55,7 @@ public class TransactionDialog {
     public static void openEntryMenu(Player player, String targetCategory) {
         ActionButton btnEnter = createBtn("<gradient:#00F260:#0575E6><b> 进入柜台选货 </b></gradient>", (v, a) -> {
             if (a instanceof Player p) {
+                // 默认跳转到第一页 (0)
                 TradeSelectorMenu.openItemSelect(p, targetCategory != null ? targetCategory : "ores", 0);
             }
         });
@@ -69,7 +68,7 @@ public class TransactionDialog {
     }
 
     // ========================================================================
-    // 2. 数量选择逻辑 (已对齐基准价显示)
+    // 2. 数量选择逻辑 (已对齐单价显示)
     // ========================================================================
 
     public static void openActionMenu(Player player, MarketItem item, boolean isBuyMode) {
@@ -82,14 +81,14 @@ public class TransactionDialog {
 
         TextComponent.Builder desc = Component.text().append(Component.newline());
         
-        // 【核心对齐】显示基准价格，不乘以 envIndex
+        // 【核心对齐】显示逻辑层判定的原始单价，不乘指数
         if (isBuyMode) {
-            desc.append(formatStandardPrice(item.getBuyPrice(), "购买："));
+            desc.append(formatStandardPrice(item.getBuyPrice(), "购买单价："));
         } else {
-            desc.append(formatStandardPrice(item.getSellPrice(), "售卖："));
+            desc.append(formatStandardPrice(item.getSellPrice(), "售卖单价："));
         }
         
-        // 环境行情仅作为参考信息展示
+        // 环境行情作为补充信息参考，不干预主价格显示
         double envIndex = plugin.getMarketManager().getLastEnvIndex();
         String envNote = plugin.getMarketManager().getLastEnvNote();
         desc.append(MM.deserialize("<newline><dark_gray>市场行情参考: <white>" + envNote + "</white> (x" + String.format("%.2f", envIndex) + ")</dark_gray>"));
@@ -137,6 +136,7 @@ public class TransactionDialog {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
         double balance = plugin.getEconomy().getBalance(player);
         
+        // 这里的 price 是由 Manager 传递的成交价，此时应已经过 Rust 后端更新。
         Component content = buildTransactionContent(item, amount, price, balance, isBuy);
         
         boolean canProceed = !isBuy || (balance >= amount * price);
@@ -159,7 +159,7 @@ public class TransactionDialog {
     }
 
     // ========================================================================
-    // 4. 视觉对齐工具
+    // 4. 视觉与格式化工具 (与 MarketDialog 完全一致)
     // ========================================================================
 
     private static Component formatStandardPrice(double price, String label) {
@@ -182,13 +182,13 @@ public class TransactionDialog {
                 .append(MM.deserialize(DIVIDER)).append(Component.newline());
 
         // 统一单价对齐
-        builder.append(formatStandardPrice(price, (isBuy ? "购买" : "售卖") + "单价：")).append(Component.newline());
+        builder.append(formatStandardPrice(price, "结算单价：")).append(Component.newline());
 
         if (isBuy) {
-            builder.append(MM.deserialize("<gray>预计支付总额：</gray><red>-" + String.format("%.2f", total) + "</red>")).append(MM.deserialize(CURRENCY)).append(Component.newline())
+            builder.append(MM.deserialize("<gray>支付总额：</gray><red>-" + String.format("%.2f", total) + "</red>")).append(MM.deserialize(CURRENCY)).append(Component.newline())
                    .append(MM.deserialize("<gray>当前账户余额：</gray><white>" + String.format("%.2f", balance) + "</white>")).append(MM.deserialize(CURRENCY));
         } else {
-            builder.append(MM.deserialize("<gray>预计成交收益：</gray><green>+" + String.format("%.2f", total) + "</green>")).append(MM.deserialize(CURRENCY));
+            builder.append(MM.deserialize("<gray>结算收益：</gray><green>+" + String.format("%.2f", total) + "</green>")).append(MM.deserialize(CURRENCY));
         }
         return builder.build();
     }
