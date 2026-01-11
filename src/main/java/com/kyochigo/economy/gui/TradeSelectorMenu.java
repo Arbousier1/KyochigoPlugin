@@ -33,7 +33,7 @@ public class TradeSelectorMenu implements Listener {
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private static final NamespacedKey MENU_KEY = new NamespacedKey("kyochigo", "trade_menu");
     
-    private static final int ITEMS_PER_PAGE = 45; // 前 5 行放物品
+    private static final int ITEMS_PER_PAGE = 45; 
     private static final Map<UUID, String> playerCurrentCategory = new ConcurrentHashMap<>();
     private static final Map<UUID, Integer> playerCurrentPage = new ConcurrentHashMap<>();
 
@@ -46,7 +46,6 @@ public class TradeSelectorMenu implements Listener {
     public static void openItemSelect(Player player, String categoryId, int page) {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
         
-        // 获取分类物品并分页
         List<MarketItem> items = plugin.getMarketManager().getAllItems().stream()
                 .filter(i -> i.getCategory().equalsIgnoreCase(categoryId))
                 .collect(Collectors.toList());
@@ -61,18 +60,14 @@ public class TradeSelectorMenu implements Listener {
         Component title = MM.deserialize("<gradient:#40E0D0:#008080>商业柜台 » " + categoryName + "</gradient> <gray>(" + (page + 1) + "/" + totalPages + ")");
         Inventory inv = Bukkit.createInventory(null, 54, title);
 
-        // --- 1. 渲染底部功能区 (45-53号位) ---
-        // 先铺满背景
         for (int i = 45; i < 54; i++) inv.setItem(i, BORDER_PANE);
 
-        // 导航与操作
         inv.setItem(45, createNavButton(Material.IRON_DOOR, "<red>返回主柜台", "back", true));
         inv.setItem(48, createNavButton(Material.ARROW, "<aqua>上一页", "prev", page > 0));
         inv.setItem(49, createNavButton(Material.NETHER_STAR, "<yellow>刷新单价", "refresh", true));
         inv.setItem(50, createNavButton(Material.ARROW, "<aqua>下一页", "next", page < totalPages - 1));
         inv.setItem(53, createNavButton(Material.BARRIER, "<gray>关闭菜单", "close", true));
 
-        // --- 2. 渲染商品区 (0-44号位) ---
         int startIdx = page * ITEMS_PER_PAGE;
         int endIdx = Math.min(startIdx + ITEMS_PER_PAGE, items.size());
         
@@ -127,7 +122,6 @@ public class TradeSelectorMenu implements Listener {
                         .map(MarketItem::getConfigKey)
                         .collect(Collectors.toList());
 
-                // 异步请求价格后重绘
                 plugin.getBackendManager().fetchBulkPrices(itemIds, response -> {
                     if (response != null) plugin.getMarketManager().updateInternalData(response);
                     Bukkit.getScheduler().runTask(plugin, () -> openItemSelect(player, cat, page));
@@ -155,14 +149,23 @@ public class TradeSelectorMenu implements Listener {
         List<Component> lore = new ArrayList<>();
         lore.add(Component.empty());
         
+        // 1. 修复：状态汉化映射
         double envIndex = plugin.getMarketManager().getLastEnvIndex();
         String envNote = plugin.getMarketManager().getLastEnvNote();
-        lore.add(MM.deserialize("<gray>实时状态: <white>" + envNote + "</white> <aqua>(x" + String.format("%.2f", envIndex) + ")</aqua>"));
+        String translatedNote = switch (envNote.toLowerCase()) {
+            case "normal" -> "行情平稳";
+            case "weekend" -> "周末特惠";
+            case "prosperous" -> "贸易繁荣";
+            case "depressed" -> "行情低迷";
+            default -> envNote;
+        };
+
+        lore.add(MM.deserialize("<gray>实时状态: <white>" + translatedNote + "</white> <aqua>(x" + String.format("%.2f", envIndex) + ")</aqua>"));
         lore.add(Component.empty());
 
-        // 直接读取更新后的单价
-        double displayBuy = item.getBuyPrice();
-        double displaySell = item.getSellPrice();
+        // 2. 修复：价格实时化 (单价 * 环境指数)
+        double displayBuy = item.getBuyPrice() * envIndex;
+        double displaySell = item.getSellPrice() * envIndex;
 
         lore.add(MM.deserialize("<white> 采购支付 <green>» " + String.format("%.2f", displayBuy) + " ⛁</green>"));
         lore.add(MM.deserialize("<white> 出售获利 <gold>» " + String.format("%.2f", displaySell) + " ⛁</gold>"));
@@ -177,10 +180,13 @@ public class TradeSelectorMenu implements Listener {
         meta.addEnchant(Enchantment.UNBREAKING, 1, true);
         meta.addItemFlags(ItemFlag.HIDE_ENCHANTS, ItemFlag.HIDE_ATTRIBUTES);
         
-        Component originalName = meta.hasDisplayName() ? meta.displayName() : Component.text(item.getPlainDisplayName());
+        // 3. 修复：名称汉化 (调用 MarketItem 的 Component 渲染逻辑)
+        Component localizedName = item.getDisplayNameComponent(plugin.getMarketManager().getCraftEngineHook())
+                .decoration(TextDecoration.ITALIC, false);
+        
         meta.displayName(Component.text()
                 .append(Component.text("✨ ", NamedTextColor.AQUA))
-                .append(originalName.decoration(TextDecoration.ITALIC, false))
+                .append(localizedName)
                 .build());
 
         meta.getPersistentDataContainer().set(MENU_KEY, PersistentDataType.STRING, "product");
