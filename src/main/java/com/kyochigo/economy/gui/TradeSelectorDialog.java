@@ -9,6 +9,7 @@ import io.papermc.paper.registry.data.dialog.DialogRegistryEntry;
 import io.papermc.paper.registry.data.dialog.action.DialogAction;
 import io.papermc.paper.registry.data.dialog.action.DialogActionCallback;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
+import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickCallback;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -21,8 +22,9 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * 交易选货中心 (v5.1 优化版)
- * 职责：专门用于交易流程中的商品选择，区别于 MarketDialog (行情看板)。
+ * 交易选货中心 (v5.5 最终优化版)
+ * 职责：专门用于交易流程中的商品选择。
+ * 优化：提取通用按钮逻辑，统一价格格式化，简化构建流程。
  */
 public class TradeSelectorDialog {
 
@@ -30,10 +32,10 @@ public class TradeSelectorDialog {
     private static final ClickCallback.Options DEFAULT_OPTIONS = ClickCallback.Options.builder().build();
     private static final Component BTN_BACK = MM.deserialize("<gray>[ 返回上级 ]</gray>");
     private static final Component BTN_CLOSE = MM.deserialize("<red>[ 关闭菜单 ]</red>");
+    private static final Key FONT_UNIFORM = Key.key("minecraft:uniform");
 
     /**
      * 打开分类选择器
-     * @param isBuyMode true=购买模式, false=售卖模式
      */
     public static void openCategorySelect(Player player, boolean isBuyMode) {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
@@ -54,7 +56,6 @@ public class TradeSelectorDialog {
 
     /**
      * 打开物品选择器
-     * 注意：此方法为 public，允许 TransactionDialog 直接调用 (NPC 分类跳转)
      */
     public static void openItemSelect(Player player, String categoryId, boolean isBuyMode) {
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
@@ -74,80 +75,76 @@ public class TradeSelectorDialog {
         showDialog(player, title, actions);
     }
 
-    // ========== 辅助方法 ==========
+    // =========================================================================
+    // 核心工厂方法 (Factory Methods)
+    // =========================================================================
 
     /**
-     * 创建标题组件
+     * 通用按钮创建器 (消除重复代码)
      */
-    private static Component createTitle(boolean isBuyMode, String template) {
-        String color = isBuyMode ? "<green>" : "<gold>";
-        String actionName = isBuyMode ? "采购" : "出售";
-        // String.format 替换 %s
-        return MM.deserialize(String.format(color + "<b>" + template + "</b>" + color, actionName));
-    }
-
-    /**
-     * 创建分类按钮
-     */
-    private static ActionButton createCategoryButton(KyochigoPlugin plugin, String categoryKey, boolean isBuyMode) {
-        DialogActionCallback callback = (v, a) -> {
-            if (a instanceof Player p) openItemSelect(p, categoryKey, isBuyMode);
-        };
-        
-        return ActionButton.builder(getCategoryName(plugin, categoryKey))
+    private static ActionButton createButton(Component label, DialogActionCallback callback) {
+        return ActionButton.builder(label)
                 .action(DialogAction.customClick(callback, DEFAULT_OPTIONS))
                 .build();
     }
 
     /**
-     * 创建物品按钮
+     * 价格格式化器 (统一视觉风格)
      */
-    private static ActionButton createItemButton(KyochigoPlugin plugin, MarketItem item, boolean isBuyMode) {
-        DialogActionCallback clickAction = (view, audience) -> {
-            if (audience instanceof Player p) {
-                TransactionDialog.openActionMenu(p, item, isBuyMode);
-            }
-        };
+    private static Component formatPrice(double price, boolean isBuyMode) {
+        String priceStr = String.format("%8.2f ⛁", price);
+        return Component.text(priceStr, isBuyMode ? NamedTextColor.AQUA : NamedTextColor.GOLD)
+                .font(FONT_UNIFORM);
+    }
 
+    // =========================================================================
+    // 业务构建逻辑
+    // =========================================================================
+
+    private static Component createTitle(boolean isBuyMode, String template) {
+        String color = isBuyMode ? "<green>" : "<gold>";
+        String actionName = isBuyMode ? "采购" : "出售";
+        return MM.deserialize(String.format(color + "<b>" + template + "</b>" + color, actionName));
+    }
+
+    private static ActionButton createCategoryButton(KyochigoPlugin plugin, String categoryKey, boolean isBuyMode) {
+        return createButton(
+            getCategoryName(plugin, categoryKey),
+            (v, a) -> { if (a instanceof Player p) openItemSelect(p, categoryKey, isBuyMode); }
+        );
+    }
+
+    private static ActionButton createItemButton(KyochigoPlugin plugin, MarketItem item, boolean isBuyMode) {
         double price = isBuyMode ? item.getBuyPrice() : item.getSellPrice();
+        
         Component label = Component.text()
                 .append(item.getDisplayNameComponent(plugin.getMarketManager().getCraftEngineHook()))
-                .append(Component.text(" - ", NamedTextColor.DARK_GRAY))
-                .append(Component.text(String.format("%.2f ⛁", price), NamedTextColor.WHITE))
+                .append(Component.text(" ┃ ", NamedTextColor.DARK_GRAY))
+                .append(formatPrice(price, isBuyMode))
                 .build();
 
-        return ActionButton.builder(label)
-                .action(DialogAction.customClick(clickAction, DEFAULT_OPTIONS))
-                .build();
+        return createButton(
+            label,
+            (v, a) -> { if (a instanceof Player p) TransactionDialog.openActionMenu(p, item, isBuyMode); }
+        );
     }
 
-    /**
-     * 创建返回按钮
-     */
     private static ActionButton createBackButton(boolean isBuyMode) {
-        DialogActionCallback backCallback = (v, a) -> {
-            if (a instanceof Player p) openCategorySelect(p, isBuyMode);
-        };
-        
-        return ActionButton.builder(BTN_BACK)
-                .action(DialogAction.customClick(backCallback, DEFAULT_OPTIONS))
-                .build();
+        return createButton(
+            BTN_BACK,
+            (v, a) -> { if (a instanceof Player p) openCategorySelect(p, isBuyMode); }
+        );
     }
 
-    /**
-     * 显示对话框的通用方法
-     */
     private static void showDialog(Player player, Component title, List<ActionButton> buttons) {
         player.showDialog(Dialog.create(factory -> {
             DialogRegistryEntry.Builder builder = factory.empty();
             builder.base(DialogBase.builder(title).build());
+            // 强制垂直列表布局
             builder.type(DialogType.multiAction(buttons).build());
         }));
     }
 
-    /**
-     * 获取分类名称
-     */
     private static Component getCategoryName(KyochigoPlugin plugin, String categoryKey) {
         String path = "categories." + categoryKey + ".name";
         String rawName = plugin.getConfiguration().getRaw().getString(path, categoryKey);

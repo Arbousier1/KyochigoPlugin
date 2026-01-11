@@ -20,8 +20,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * 市场物品管理器 (v3.1 兼容性修复版)
- * 职责：适配 MarketItem Builder 模式及枚举类型。
+ * 市场物品管理器 (v3.2 最终修复版)
+ * 修复：createMarketItem 正确处理 type 字段
  */
 public class MarketManager {
 
@@ -61,14 +61,15 @@ public class MarketManager {
     }
 
     /**
-     * [修复 1] 使用 MarketItem.Builder 替换 undefined 的构造函数
+     * [修复点] 创建物品时正确传递字符串类型的 type，Builder 内部会自动解析为 Enum
      */
     private MarketItem createMarketItem(String key, ConfigurationSection data) {
         return new MarketItem.Builder()
                 .key(key)
-                .type(data.getString("type", "MATERIAL"))
+                // 确保从配置中读取字符串，默认为 MATERIAL
+                .type(data.getString("type", "MATERIAL")) 
                 .id(data.getString("id"))
-                .customName(data.getString("custom_name")) // 注意配置键名对齐
+                .customName(data.getString("custom_name"))
                 .iconMaterial(data.getString("icon"))
                 .category(data.getString("category", "misc"))
                 .basePrice(data.getDouble("base_price"))
@@ -103,13 +104,10 @@ public class MarketManager {
         });
     }
 
-    /**
-     * [修复 2] 将 getType() 替换为 getItemType() 枚举对比
-     */
     private void preheatIconCache(MarketItem item) {
         ItemStack stack = Optional.ofNullable(item.getIcon(craftEngineHook))
                 .or(() -> {
-                    // 使用枚举类型判定替代字符串判定
+                    // 使用标准的 getItemType() 方法
                     if (item.getItemType() == MarketItem.ItemType.MATERIAL) {
                         Material mat = Material.matchMaterial(item.getId());
                         if (mat != null) return Optional.of(new ItemStack(mat));

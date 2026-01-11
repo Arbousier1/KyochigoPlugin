@@ -87,12 +87,14 @@ public class BackendManager {
 
     /**
      * 发送计价/交易请求
+     * @param type "buy" 或 "sell"，决定调用后端哪个接口
      * @param manualEnvIndex 如果为 null，后端使用实时环境指数；如果不为 null，后端强制使用该值（防滑点）。
      */
     public void sendCalculateRequest(Player player, String type, String itemId, double amount, 
                                      double basePrice, double decayLambda, Double manualEnvIndex, 
                                      boolean isPreview, Consumer<JsonObject> callback) {
         
+        // [关键] 路由分流：根据操作类型选择后端接口
         String endpoint = type.equalsIgnoreCase("buy") ? "/calculate_buy" : "/calculate_sell";
         String url = plugin.getConfiguration().getBackendUrl() + endpoint;
 
