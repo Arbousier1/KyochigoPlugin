@@ -21,8 +21,9 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * FancyNpcs 动作挂钩 (v5.6 同步修复版)
- * 职责：连接物理 NPC 与插件贸易系统，已修复异步线程打开 GUI 导致的 IllegalStateException。
+ * FancyNpcs 动作挂钩 (v5.7 编译修复版)
+ * 职责：连接物理 NPC 与插件贸易系统。
+ * 修改说明：对齐 TradeSelectorMenu 的分页参数。
  */
 public class FancyNpcsHook extends NpcAction {
 
@@ -47,7 +48,7 @@ public class FancyNpcsHook extends NpcAction {
 
         KyochigoPlugin plugin = KyochigoPlugin.getInstance();
 
-        // 使用调度器切换回主线程执行，防止报错
+        // 使用调度器切换回主线程执行，防止异步打开 GUI 报错
         Bukkit.getScheduler().runTask(plugin, () -> {
             // 1. 特殊逻辑：打开全分类看板
             if (ANALYZER_TRIGGERS.contains(value.toLowerCase())) {
@@ -69,7 +70,8 @@ public class FancyNpcsHook extends NpcAction {
         // --- 分支 A：空手点击 NPC ---
         // 动作：直接打开该分类的箱子选货菜单
         if (hand.getType() == Material.AIR) {
-            TradeSelectorMenu.openItemSelect(player, targetCategory);
+            // 【核心修复】增加参数 0，匹配 TradeSelectorMenu.openItemSelect(Player, String, int)
+            TradeSelectorMenu.openItemSelect(player, targetCategory, 0);
             return;
         }
 
@@ -89,7 +91,7 @@ public class FancyNpcsHook extends NpcAction {
             return;
         }
 
-        // 3. 执行快捷出售：先请求计价，计价成功后会自动弹出确认对话框
+        // 3. 执行快捷出售：弹出确认对话框
         plugin.getTransactionManager().openSellConfirmDialog(player, item, hand.getAmount());
     }
 
